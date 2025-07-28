@@ -6,6 +6,7 @@ This script demonstrates basic PyTorch usage with a simple neural network
 that learns to classify random data.
 """
 
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -97,13 +98,17 @@ def main():
   torch.manual_seed(42)
   np.random.seed(42)
 
-  # Check if CUDA is available
-  device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+  # Prefer CUDA, then Apple Silicon. Use CPU as fallback.
+  device = torch.device("cpu")
+  if torch.cuda.is_available():
+    device = torch.device("cuda")
+  elif torch.mps.device_count() > 0:
+    device = torch.device("mps")
   print(f"Using device: {device}")
 
   # Generate toy data
   print("\nGenerating toy data...")
-  X, y = generate_toy_data(n_samples=1000, input_size=10)
+  X, y = generate_toy_data(n_samples=1000, input_size=128)
   X = X.to(device)
   y = y.to(device)
 
@@ -112,14 +117,17 @@ def main():
 
   # Create model
   print("\nCreating model...")
-  model = SimpleNet(input_size=10, hidden_size=20, output_size=2)
+  model = SimpleNet(input_size=128, hidden_size=2048, output_size=2)
   model = model.to(device)
 
   print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
   # Train model
   print("\nTraining model...")
+  start_time = time.time()
   losses = train_model(model, X, y, epochs=100, lr=0.01)
+  elapsed_time = time.time() - start_time
+  print(f"Training time: {elapsed_time:.2f} seconds on device {device}")
 
   # Evaluate model
   print("\nEvaluating model...")
