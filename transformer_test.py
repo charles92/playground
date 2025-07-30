@@ -10,9 +10,27 @@ from transformer import (
     Encoder,
     EncoderLayer,
     FeedForward,
+    PositionalEncoding,
     SelfAttention,
     Transformer,
 )
+
+
+class PositionalEncodingTest(unittest.TestCase):
+
+    def test_positional_encoding_unbatched(self):
+        seq_length, d_model = 100, 512
+        x = torch.randn(seq_length, d_model)
+        y = PositionalEncoding(seq_length, d_model)(x)
+        self.assertEqual(y.shape, (seq_length, d_model))
+        self.assertGreater(torch.norm(y - x), 0)
+
+    def test_positional_encoding_batched(self):
+        batch_size, seq_length, d_model = 4, 100, 512
+        x = torch.randn(batch_size, seq_length, d_model)
+        y = PositionalEncoding(seq_length, d_model)(x)
+        self.assertEqual(y.shape, (batch_size, seq_length, d_model))
+        self.assertGreater(torch.norm(y - x), 0)
 
 
 class OutputShapeTest(unittest.TestCase):
@@ -71,6 +89,7 @@ class OutputShapeTest(unittest.TestCase):
             d_ff=2048,
             num_heads=8,
             num_layers=6,
+            max_seq_len=256,
         )
         output = encoder(x)
         self.assertEqual(output.shape, x.shape)
@@ -94,6 +113,7 @@ class OutputShapeTest(unittest.TestCase):
             d_ff=2048,
             num_heads=8,
             num_layers=6,
+            max_seq_len=256,
         )
         output = decoder(x, ctx)
         self.assertEqual(output.shape, x.shape)
@@ -107,6 +127,7 @@ class OutputShapeTest(unittest.TestCase):
             d_out=1000,
             num_heads=8,
             num_layers=6,
+            max_seq_len=256,
         )
         output = transformer(x, ctx)
         self.assertEqual(output.shape, (16, 102, 1000))
@@ -120,6 +141,7 @@ class OutputShapeTest(unittest.TestCase):
             d_out=1000,
             num_heads=8,
             num_layers=6,
+            max_seq_len=256,
         )
 
         with torch.no_grad():

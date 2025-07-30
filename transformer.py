@@ -27,6 +27,28 @@ import torch
 import torch.nn as nn
 
 
+class PositionalEncoding(nn.Module):
+    """Positional encoding for the transformer model."""
+
+    def __init__(self, max_seq_len: int, d_model: int, **kwargs):
+        super().__init__(**kwargs)
+        # Encoding matrix is (L, d_model) where L is the sequence length.
+        positions = torch.arange(max_seq_len)[:, None]  # (L, 1)
+        emb_dim = torch.arange(0, d_model, 2)[None, :] / d_model  # (1, d_model // 2)
+
+        angular_rates = 1 / (10000**emb_dim)  # (1, d_model // 2)
+        angles = positions * angular_rates  # (L, d_model // 2)
+
+        self.pe = torch.zeros(max_seq_len, d_model, requires_grad=False)
+        self.pe[:, 0::2] = torch.sin(angles)
+        self.pe[:, 1::2] = torch.cos(angles)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Handle both batched (B, L, d_model) and unbatched (L, d_model) cases
+        seq_len = x.size(-2)
+        return x + self.pe[:seq_len, :]
+
+
 class BaseAttention(nn.Module):
     """Base attention module with multi-head attention and layer normalization."""
 
@@ -136,10 +158,12 @@ class Encoder(nn.Module):
         d_ff: int,
         num_heads: int,
         num_layers: int,
+        max_seq_len: int,
         dropout_rate: float = 0.1,
         **kwargs
     ):
         super().__init__(**kwargs)
+        self.pe = PositionalEncoding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout_rate)
         self.layers = [
             EncoderLayer(d_model, d_ff, num_heads, dropout_rate, **kwargs)
@@ -147,6 +171,7 @@ class Encoder(nn.Module):
         ]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.pe(x)
         x = self.dropout(x)
         for layer in self.layers:
             x = layer(x)
@@ -185,10 +210,12 @@ class Decoder(nn.Module):
         d_ff: int,
         num_heads: int,
         num_layers: int,
+        max_seq_len: int,
         dropout_rate: float = 0.1,
         **kwargs
     ):
         super().__init__(**kwargs)
+        self.pe = PositionalEncoding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout_rate)
         self.layers = [
             DecoderLayer(d_model, d_ff, num_heads, dropout_rate, **kwargs)
@@ -196,6 +223,7 @@ class Decoder(nn.Module):
         ]
 
     def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
+        x = self.pe(x)
         x = self.dropout(x)
         for layer in self.layers:
             x = layer(x, ctx)
@@ -212,15 +240,16 @@ class Transformer(nn.Module):
         d_out: int,
         num_heads: int,
         num_layers: int,
+        max_seq_len: int,
         dropout_rate: float = 0.1,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.encoder = Encoder(
-            d_model, d_ff, num_heads, num_layers, dropout_rate, **kwargs
+            d_model, d_ff, num_heads, num_layers, max_seq_len, dropout_rate, **kwargs
         )
         self.decoder = Decoder(
-            d_model, d_ff, num_heads, num_layers, dropout_rate, **kwargs
+            d_model, d_ff, num_heads, num_layers, max_seq_len, dropout_rate, **kwargs
         )
         self.linear = nn.Linear(d_model, d_out)
 

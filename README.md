@@ -46,16 +46,18 @@ python transformer_test.py
   - Model evaluation
   - Training visualization
 - **transformer.py**: Encoder-decoder transformer architecture implementation
+- **visualize_positional_encoding.py**: Visualization script for positional encoding patterns
 
 ## Project Structure
 
 ```
 playground/
-├── requirements.txt      # Python dependencies
-├── toy_example.py        # Simple PyTorch example
-├── transformer.py        # Transformer architecture implementation
-├── transformer_test.py   # Unit tests for transformer
-└── README.md             # This file
+├── requirements.txt                   # Python dependencies
+├── toy_example.py                     # Simple PyTorch example
+├── transformer.py                     # Transformer architecture implementation
+├── transformer_test.py                # Unit tests for transformer
+├── visualize_positional_encoding.py   # Positional encoding visualization
+└── README.md                          # This file
 ```
 
 ## Troubleshooting
