@@ -23,11 +23,11 @@ num_layers = 6
 ```
 """
 
+import datasets
 import torch
 import torch.nn as nn
 import transformers
 from torch.utils import data
-from torchtext import datasets
 
 
 class PositionalEncoding(nn.Module):
@@ -312,22 +312,19 @@ def load_dataset(
 
     # Load the Multi30k dataset with German-English language pair.
     print("Loading Multi30k dataset...")
-    train_iter, valid_iter = datasets.Multi30k(
-        root=".data", split=("train", "valid"), language_pair=("de", "en")
-    )
-
-    # Create dataset objects.
-    train_dataset = IterToDataset(train_iter)
-    valid_dataset = IterToDataset(valid_iter)
+    train_ds = datasets.load_dataset("bentrevett/multi30k", split="train")
+    valid_ds = datasets.load_dataset("bentrevett/multi30k", split="validation")
 
     print("Dataset loaded successfully!")
-    print(f"Training set: {len(train_dataset)} examples")
-    print(f"Validation set: {len(valid_dataset)} examples")
+    print(f"Training set: {len(train_ds)} examples")
+    print(f"Validation set: {len(valid_ds)} examples")
 
     # Print a few examples from the training set
     print("\nSample training examples:")
-    for i in range(min(5, len(train_dataset))):
-        src, tgt = train_dataset[i]
+    for i in range(min(5, len(train_ds))):
+        src = train_ds[i]["de"]
+        tgt = train_ds[i]["en"]
+        # print(train_ds[i])
         print(f"Example {i+1}:")
         print(f"  German text: {src}")
         print(f"  English text: {tgt}")
@@ -338,8 +335,8 @@ def load_dataset(
     tokenizer = transformers.BertTokenizer.from_pretrained("bert-base-uncased")
 
     def _string_to_tokens(
-        batch: list[list[str]],
-    ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+        batch: list[dict[str, str]],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Converts batch of source-target pairs into batches of tokens and attention masks.
 
         Returns:
@@ -347,7 +344,8 @@ def load_dataset(
             labels: Target language token IDs.
             attention_mask: Attention masks.
         """
-        src_batch, tgt_batch = zip(*batch)
+        src_batch = [pair["de"] for pair in batch]
+        tgt_batch = [pair["en"] for pair in batch]
         tokens = tokenizer(
             text=src_batch,
             text_target=tgt_batch,
@@ -361,14 +359,14 @@ def load_dataset(
 
     # Create DataLoader objects.
     train_loader = data.DataLoader(
-        train_dataset,
+        train_ds,
         batch_size=batch_size,
         shuffle=shuffle,
         collate_fn=_string_to_tokens,
     )
 
     valid_loader = data.DataLoader(
-        valid_dataset,
+        valid_ds,
         batch_size=batch_size,
         shuffle=False,
         collate_fn=_string_to_tokens,

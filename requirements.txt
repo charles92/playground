@@ -1,13 +1,9 @@
 # PyTorch. torchtext has stopped updating, so we have to force an older version across the board.
-torch==2.3
-torchdata==0.8
-torchvision==0.18
-torchtext==0.18  # Requires Python <=
+torch>=2.3
+torchvision>=0.18
 
-# Dataset dependencies.
-portalocker
-
-# Pretrained model weights.
+# Hugging Face resources.
+datasets
 transformers
 
 # Data processing
