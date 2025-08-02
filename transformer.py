@@ -284,21 +284,6 @@ class Transformer(nn.Module):
         return x
 
 
-class IterToDataset(data.Dataset):
-    """Custom dataset wrapper for Python iterator data."""
-
-    def __init__(self, data_iter):
-        # Convert iterator to list. We could have also tried an IterableDataset, which would
-        # avoid this conversion (it only needs to support fetch next).
-        self.data = list(data_iter)
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-
 def load_dataset(
     batch_size=32, shuffle=True
 ) -> tuple[data.DataLoader, data.DataLoader, int]:
