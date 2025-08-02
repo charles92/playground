@@ -83,8 +83,9 @@ class OutputShapeTest(unittest.TestCase):
         self.assertEqual(output.shape, x.shape)
 
     def test_encoder(self):
-        x = torch.rand((16, 143, 512))  # (batch, length, d_model)
+        x = torch.randint(0, 1000, (16, 143))  # (batch, length)
         encoder = Encoder(
+            vocab_size=1000,
             d_model=512,
             d_ff=2048,
             num_heads=8,
@@ -92,7 +93,7 @@ class OutputShapeTest(unittest.TestCase):
             max_seq_len=256,
         )
         output = encoder(x)
-        self.assertEqual(output.shape, x.shape)
+        self.assertEqual(output.shape, (16, 143, 512))
 
     def test_decoder_layer(self):
         x = torch.rand((16, 102, 512))  # (batch, length, d_model)
@@ -106,9 +107,10 @@ class OutputShapeTest(unittest.TestCase):
         self.assertEqual(output.shape, x.shape)
 
     def test_decoder(self):
-        x = torch.rand((16, 102, 512))  # (batch, length, d_model)
+        x = torch.randint(0, 1000, (16, 102))  # (batch, length)
         ctx = torch.rand((16, 143, 512))  # (batch, length, d_model)
         decoder = Decoder(
+            vocab_size=1000,
             d_model=512,
             d_ff=2048,
             num_heads=8,
@@ -116,12 +118,13 @@ class OutputShapeTest(unittest.TestCase):
             max_seq_len=256,
         )
         output = decoder(x, ctx)
-        self.assertEqual(output.shape, x.shape)
+        self.assertEqual(output.shape, (16, 102, 512))
 
     def test_transformer(self):
-        x = torch.rand((16, 102, 512))  # (batch, length, d_model)
-        ctx = torch.rand((16, 143, 512))  # (batch, length, d_model)
+        x = torch.randint(0, 1000, (16, 102))  # (batch, length)
+        ctx = torch.randint(0, 1000, (16, 143))  # (batch, length)
         transformer = Transformer(
+            vocab_size=1000,
             d_model=512,
             d_ff=2048,
             d_out=1000,
@@ -133,9 +136,10 @@ class OutputShapeTest(unittest.TestCase):
         self.assertEqual(output.shape, (16, 102, 1000))
 
     def test_transformer_no_grad(self):
-        x = torch.rand((16, 102, 512))  # (batch, length, d_model)
-        ctx = torch.rand((16, 143, 512))  # (batch, length, d_model)
+        x = torch.randint(0, 1000, (16, 102))  # (batch, length)
+        ctx = torch.randint(0, 1000, (16, 143))  # (batch, length)
         transformer = Transformer(
+            vocab_size=1000,
             d_model=512,
             d_ff=2048,
             d_out=1000,

@@ -154,6 +154,7 @@ class Encoder(nn.Module):
 
     def __init__(
         self,
+        vocab_size: int,
         d_model: int,
         d_ff: int,
         num_heads: int,
@@ -163,6 +164,7 @@ class Encoder(nn.Module):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.emb = nn.Embedding(vocab_size, d_model)
         self.pe = PositionalEncoding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout_rate)
         self.layers = [
@@ -171,6 +173,7 @@ class Encoder(nn.Module):
         ]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.emb(x)
         x = self.pe(x)
         x = self.dropout(x)
         for layer in self.layers:
@@ -206,6 +209,7 @@ class Decoder(nn.Module):
 
     def __init__(
         self,
+        vocab_size: int,
         d_model: int,
         d_ff: int,
         num_heads: int,
@@ -215,6 +219,7 @@ class Decoder(nn.Module):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.emb = nn.Embedding(vocab_size, d_model)
         self.pe = PositionalEncoding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout_rate)
         self.layers = [
@@ -223,6 +228,7 @@ class Decoder(nn.Module):
         ]
 
     def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
+        x = self.emb(x)
         x = self.pe(x)
         x = self.dropout(x)
         for layer in self.layers:
@@ -235,6 +241,7 @@ class Transformer(nn.Module):
 
     def __init__(
         self,
+        vocab_size: int,
         d_model: int,
         d_ff: int,
         d_out: int,
@@ -246,10 +253,24 @@ class Transformer(nn.Module):
     ):
         super().__init__(**kwargs)
         self.encoder = Encoder(
-            d_model, d_ff, num_heads, num_layers, max_seq_len, dropout_rate, **kwargs
+            vocab_size,
+            d_model,
+            d_ff,
+            num_heads,
+            num_layers,
+            max_seq_len,
+            dropout_rate,
+            **kwargs,
         )
         self.decoder = Decoder(
-            d_model, d_ff, num_heads, num_layers, max_seq_len, dropout_rate, **kwargs
+            vocab_size,
+            d_model,
+            d_ff,
+            num_heads,
+            num_layers,
+            max_seq_len,
+            dropout_rate,
+            **kwargs,
         )
         self.linear = nn.Linear(d_model, d_out)
 
