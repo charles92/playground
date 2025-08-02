@@ -7,6 +7,9 @@ torchtext==0.18  # Requires Python <=
 # Dataset dependencies.
 portalocker
 
+# Pretrained model weights.
+transformers
+
 # Data processing
 numpy>=1.21.0
 matplotlib>=3.5.0

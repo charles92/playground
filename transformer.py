@@ -23,12 +23,11 @@ num_layers = 6
 ```
 """
 
-from typing import Callable
-
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
-from torchtext import datasets, transforms
+import transformers
+from torch.utils import data
+from torchtext import datasets
 
 
 class PositionalEncoding(nn.Module):
@@ -285,43 +284,24 @@ class Transformer(nn.Module):
         return x
 
 
-class TokenDataset(Dataset):
-    """Custom dataset wrapper for Multi30k data."""
+class IterToDataset(data.Dataset):
+    """Custom dataset wrapper for Python iterator data."""
 
-    def __init__(self, data_iter, tokenizer: Callable[[str], list[str]] | None = None):
+    def __init__(self, data_iter):
         # Convert iterator to list. We could have also tried an IterableDataset, which would
         # avoid this conversion (it only needs to support fetch next).
         self.data = list(data_iter)
-        self.tokenizer = tokenizer
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        src, tgt = self.data[idx]
-
-        if self.tokenizer:
-            # Tokenize the text if tokenizer is provided
-            src_tokens = [int(tid) for tid in self.tokenizer(src)]
-            tgt_tokens = [int(tid) for tid in self.tokenizer(tgt)]
-            return src_tokens, tgt_tokens
-        else:
-            # Return raw text
-            return src, tgt
+        return self.data[idx]
 
 
-def collate_fn(batch):
-    """Custom collate function to handle variable length sequences."""
-    src_batch, tgt_batch = zip(*batch)
-
-    # For now, return as-is. In a real implementation, you'd want to:
-    # 1. Pad sequences to the same length
-    # 2. Convert to tensors
-    # 3. Create attention masks
-    return src_batch, tgt_batch
-
-
-def load_dataset(batch_size=32, shuffle=True) -> tuple[DataLoader, DataLoader, int]:
+def load_dataset(
+    batch_size=32, shuffle=True
+) -> tuple[data.DataLoader, data.DataLoader, int]:
     """Load the Multi30k dataset with German-English language pair.
 
     Returns:
@@ -336,32 +316,9 @@ def load_dataset(batch_size=32, shuffle=True) -> tuple[DataLoader, DataLoader, i
         root=".data", split=("train", "valid"), language_pair=("de", "en")
     )
 
-    # Load the tokenizer.
-    print("Loading BERT tokenizer...")
-    tokenizer = transforms.BERTTokenizer(
-        vocab_path="https://huggingface.co/bert-base-uncased/resolve/main/vocab.txt"
-    )
-    # TODO: get the vocabulary size from the tokenizer.
-    _TOKEN_VOCAB_SIZE = 30522
-
     # Create dataset objects.
-    train_dataset = TokenDataset(train_iter, tokenizer)
-    valid_dataset = TokenDataset(valid_iter, tokenizer)
-
-    # Create DataLoader objects.
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        collate_fn=collate_fn if tokenizer else None,
-    )
-
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn if tokenizer else None,
-    )
+    train_dataset = IterToDataset(train_iter)
+    valid_dataset = IterToDataset(valid_iter)
 
     print("Dataset loaded successfully!")
     print(f"Training set: {len(train_dataset)} examples")
@@ -372,15 +329,52 @@ def load_dataset(batch_size=32, shuffle=True) -> tuple[DataLoader, DataLoader, i
     for i in range(min(5, len(train_dataset))):
         src, tgt = train_dataset[i]
         print(f"Example {i+1}:")
-        if tokenizer:
-            print(f"  German tokens: {src}")
-            print(f"  English tokens: {tgt}")
-        else:
-            print(f"  German: {src}")
-            print(f"  English: {tgt}")
+        print(f"  German text: {src}")
+        print(f"  English text: {tgt}")
         print()
 
-    return train_loader, valid_loader, _TOKEN_VOCAB_SIZE
+    # Load the tokenizer.
+    print("Loading BERT tokenizer...")
+    tokenizer = transformers.BertTokenizer.from_pretrained("bert-base-uncased")
+
+    def _string_to_tokens(
+        batch: list[list[str]],
+    ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
+        """Converts batch of source-target pairs into batches of tokens and attention masks.
+
+        Returns:
+            input_ids: Source language token IDs.
+            labels: Target language token IDs.
+            attention_mask: Attention masks.
+        """
+        src_batch, tgt_batch = zip(*batch)
+        tokens = tokenizer(
+            text=src_batch,
+            text_target=tgt_batch,
+            padding="max_length",
+            truncation=True,
+            max_length=64,
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+        return tokens["input_ids"], tokens["labels"], tokens["attention_mask"]
+
+    # Create DataLoader objects.
+    train_loader = data.DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        collate_fn=_string_to_tokens,
+    )
+
+    valid_loader = data.DataLoader(
+        valid_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=_string_to_tokens,
+    )
+
+    return train_loader, valid_loader, len(tokenizer)
 
 
 def main() -> None:
@@ -389,11 +383,12 @@ def main() -> None:
 
     # Test the DataLoader
     print("\nTesting DataLoader:")
-    for batch_idx, (src_batch, tgt_batch) in enumerate(train_loader):
+    for batch_idx, (src_batch, tgt_batch, mask_batch) in enumerate(train_loader):
         print(f"Batch {batch_idx + 1}:")
         print(f"  Batch size: {len(src_batch)}")
         print(f"  Sample German: {src_batch[0]}")
         print(f"  Sample English: {tgt_batch[0]}")
+        print(f"  Sample attention mask: {mask_batch[0]}")
         if batch_idx >= 2:  # Only show first 3 batches
             break
 
