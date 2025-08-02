@@ -321,26 +321,39 @@ def load_dataset(
 
     def _string_to_tokens(
         batch: list[dict[str, str]],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Converts batch of source-target pairs into batches of tokens and attention masks.
 
         Returns:
-            input_ids: Source language token IDs.
-            labels: Target language token IDs.
-            attention_mask: Attention masks.
+            - Source token IDs.
+            - Target token IDs.
+            - Source padding masks, where 1 indicates a valid token and 0 indicates padding.
+            - Target padding masks, where 1 indicates a valid token and 0 indicates padding.
         """
         src_batch = [pair["de"] for pair in batch]
         tgt_batch = [pair["en"] for pair in batch]
-        tokens = tokenizer(
+        src_tokens = tokenizer(
             text=src_batch,
-            text_target=tgt_batch,
             padding="max_length",
             truncation=True,
             max_length=64,
             return_attention_mask=True,
             return_tensors="pt",
         )
-        return tokens["input_ids"], tokens["labels"], tokens["attention_mask"]
+        tgt_tokens = tokenizer(
+            text=tgt_batch,
+            padding="max_length",
+            truncation=True,
+            max_length=64,
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+        return (
+            src_tokens["input_ids"],
+            tgt_tokens["input_ids"],
+            src_tokens["attention_mask"],
+            tgt_tokens["attention_mask"],
+        )
 
     # Create DataLoader objects.
     train_loader = data.DataLoader(
@@ -366,12 +379,13 @@ def main() -> None:
 
     # Test the DataLoader
     print("\nTesting DataLoader:")
-    for batch_idx, (src_batch, tgt_batch, mask_batch) in enumerate(train_loader):
+    for batch_idx, (src, tgt, src_mask, tgt_mask) in enumerate(train_loader):
         print(f"Batch {batch_idx + 1}:")
-        print(f"  Batch size: {len(src_batch)}")
-        print(f"  Sample German: {src_batch[0]}")
-        print(f"  Sample English: {tgt_batch[0]}")
-        print(f"  Sample attention mask: {mask_batch[0]}")
+        print(f"  Batch size: {len(src)}")
+        print(f"  Sample German: {src[0]}")
+        print(f"  Sample English: {tgt[0]}")
+        print(f"  Sample src mask: {src_mask[0]}")
+        print(f"  Sample tgt mask: {tgt_mask[0]}")
         if batch_idx >= 2:  # Only show first 3 batches
             break
 
