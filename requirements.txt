@@ -1,6 +1,11 @@
-# PyTorch core
-torch>=2.0.0
-torchvision>=0.15.0
+# PyTorch. torchtext has stopped updating, so we have to force an older version across the board.
+torch==2.3
+torchdata==0.8
+torchvision==0.18
+torchtext==0.18  # Requires Python <=
+
+# Dataset dependencies.
+portalocker
 
 # Data processing
 numpy>=1.21.0

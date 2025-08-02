@@ -23,8 +23,12 @@ num_layers = 6
 ```
 """
 
+from typing import Callable
+
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+from torchtext import datasets, transforms
 
 
 class PositionalEncoding(nn.Module):
@@ -279,3 +283,120 @@ class Transformer(nn.Module):
         x = self.decoder(x, ctx)
         x = self.linear(x)
         return x
+
+
+class TokenDataset(Dataset):
+    """Custom dataset wrapper for Multi30k data."""
+
+    def __init__(self, data_iter, tokenizer: Callable[[str], list[str]] | None = None):
+        # Convert iterator to list. We could have also tried an IterableDataset, which would
+        # avoid this conversion (it only needs to support fetch next).
+        self.data = list(data_iter)
+        self.tokenizer = tokenizer
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        src, tgt = self.data[idx]
+
+        if self.tokenizer:
+            # Tokenize the text if tokenizer is provided
+            src_tokens = [int(tid) for tid in self.tokenizer(src)]
+            tgt_tokens = [int(tid) for tid in self.tokenizer(tgt)]
+            return src_tokens, tgt_tokens
+        else:
+            # Return raw text
+            return src, tgt
+
+
+def collate_fn(batch):
+    """Custom collate function to handle variable length sequences."""
+    src_batch, tgt_batch = zip(*batch)
+
+    # For now, return as-is. In a real implementation, you'd want to:
+    # 1. Pad sequences to the same length
+    # 2. Convert to tensors
+    # 3. Create attention masks
+    return src_batch, tgt_batch
+
+
+def load_dataset(batch_size=32, shuffle=True) -> tuple[DataLoader, DataLoader, int]:
+    """Load the Multi30k dataset with German-English language pair.
+
+    Returns:
+        train_loader: DataLoader for the training set.
+        valid_loader: DataLoader for the validation set.
+        vocab_size: The size of the vocabulary.
+    """
+
+    # Load the Multi30k dataset with German-English language pair.
+    print("Loading Multi30k dataset...")
+    train_iter, valid_iter = datasets.Multi30k(
+        root=".data", split=("train", "valid"), language_pair=("de", "en")
+    )
+
+    # Load the tokenizer.
+    print("Loading BERT tokenizer...")
+    tokenizer = transforms.BERTTokenizer(
+        vocab_path="https://huggingface.co/bert-base-uncased/resolve/main/vocab.txt"
+    )
+    # TODO: get the vocabulary size from the tokenizer.
+    _TOKEN_VOCAB_SIZE = 30522
+
+    # Create dataset objects.
+    train_dataset = TokenDataset(train_iter, tokenizer)
+    valid_dataset = TokenDataset(valid_iter, tokenizer)
+
+    # Create DataLoader objects.
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        collate_fn=collate_fn if tokenizer else None,
+    )
+
+    valid_loader = DataLoader(
+        valid_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn if tokenizer else None,
+    )
+
+    print("Dataset loaded successfully!")
+    print(f"Training set: {len(train_dataset)} examples")
+    print(f"Validation set: {len(valid_dataset)} examples")
+
+    # Print a few examples from the training set
+    print("\nSample training examples:")
+    for i in range(min(5, len(train_dataset))):
+        src, tgt = train_dataset[i]
+        print(f"Example {i+1}:")
+        if tokenizer:
+            print(f"  German tokens: {src}")
+            print(f"  English tokens: {tgt}")
+        else:
+            print(f"  German: {src}")
+            print(f"  English: {tgt}")
+        print()
+
+    return train_loader, valid_loader, _TOKEN_VOCAB_SIZE
+
+
+def main() -> None:
+    # Uncomment the following lines when torchtext is properly installed
+    train_loader, valid_loader, vocab_size = load_dataset(batch_size=16)
+
+    # Test the DataLoader
+    print("\nTesting DataLoader:")
+    for batch_idx, (src_batch, tgt_batch) in enumerate(train_loader):
+        print(f"Batch {batch_idx + 1}:")
+        print(f"  Batch size: {len(src_batch)}")
+        print(f"  Sample German: {src_batch[0]}")
+        print(f"  Sample English: {tgt_batch[0]}")
+        if batch_idx >= 2:  # Only show first 3 batches
+            break
+
+
+if __name__ == "__main__":
+    main()
