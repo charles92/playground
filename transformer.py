@@ -137,7 +137,7 @@ class EncoderLayer(nn.Module):
         d_ff: int,
         num_heads: int,
         dropout_rate: float = 0.1,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.attn = SelfAttention(d_model, num_heads, dropout_rate, **kwargs)
@@ -160,7 +160,7 @@ class Encoder(nn.Module):
         num_layers: int,
         max_seq_len: int,
         dropout_rate: float = 0.1,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.pe = PositionalEncoding(max_seq_len, d_model)
@@ -187,7 +187,7 @@ class DecoderLayer(nn.Module):
         d_ff: int,
         num_heads: int,
         dropout_rate: float = 0.1,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.self_attn = CausalSelfAttention(d_model, num_heads, dropout_rate, **kwargs)
@@ -212,7 +212,7 @@ class Decoder(nn.Module):
         num_layers: int,
         max_seq_len: int,
         dropout_rate: float = 0.1,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.pe = PositionalEncoding(max_seq_len, d_model)
@@ -242,7 +242,7 @@ class Transformer(nn.Module):
         num_layers: int,
         max_seq_len: int,
         dropout_rate: float = 0.1,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.encoder = Encoder(
