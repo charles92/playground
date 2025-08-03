@@ -71,9 +71,25 @@ class BaseAttention(nn.Module):
 class SelfAttention(BaseAttention):
     """Self-attention mechanism that attends to the same sequence."""
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        attn_out, _ = self.mha(query=x, key=x, value=x, need_weights=False)
-        x += attn_out
+    def forward(
+        self, x: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, d_model).
+            mask: Padding mask of shape (batch_size, seq_len), where 1 indicates a valid token and
+                0 indicates padding.
+        """
+        if mask is not None:
+            # MHA's key_padding_mask expects True to mark padding (invalid) tokens.
+            mask = ~mask.bool()
+        attn_out, _ = self.mha(
+            query=x, key=x, value=x, key_padding_mask=mask, need_weights=False
+        )
+        # Note: in-place addition "x += attn_out" is NOT equivalent, and produces unexpected
+        # results. See https://github.com/pytorch/pytorch/issues/8212.
+        x = x + attn_out
         x = self.norm(x)
         return x
 
@@ -81,9 +97,29 @@ class SelfAttention(BaseAttention):
 class CrossAttention(BaseAttention):
     """Cross-attention mechanism that attends to a different context sequence."""
 
-    def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
-        attn_out, _ = self.mha(query=x, key=ctx, value=ctx, need_weights=False)
-        x += attn_out
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: torch.Tensor,
+        ctx_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, d_model).
+            ctx: Context tensor of shape (batch_size, ctx_len, d_model).
+            ctx_mask: Padding mask of shape (batch_size, ctx_len), where 1 indicates a valid token
+                and 0 indicates padding.
+        """
+        if ctx_mask is not None:
+            # MHA's key_padding_mask expects True to mark padding (invalid) tokens.
+            ctx_mask = ~ctx_mask.bool()
+        attn_out, _ = self.mha(
+            query=x, key=ctx, value=ctx, key_padding_mask=ctx_mask, need_weights=False
+        )
+        # Note: in-place addition "x += attn_out" is NOT equivalent, and produces unexpected
+        # results. See https://github.com/pytorch/pytorch/issues/8212.
+        x = x + attn_out
         x = self.norm(x)
         return x
 
@@ -91,8 +127,21 @@ class CrossAttention(BaseAttention):
 class CausalSelfAttention(BaseAttention):
     """Causal self-attention mechanism with masking for autoregressive generation."""
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO: also consider padding mask.
+    def forward(
+        self, x: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, d_model).
+            mask: Padding mask of shape (batch_size, seq_len), where 1 indicates a valid token and
+                0 indicates padding.
+        """
+        if mask is not None:
+            # MHA's key_padding_mask expects True to mark padding (invalid) tokens.
+            mask = ~mask.bool()
+
+        # Causal attention mask.
         seq_len = x.size(1)
         causal_mask = torch.triu(
             torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1
@@ -102,11 +151,14 @@ class CausalSelfAttention(BaseAttention):
             query=x,
             key=x,
             value=x,
+            key_padding_mask=mask,
             need_weights=False,
             attn_mask=causal_mask,
             is_causal=True,
         )
-        x += attn_out
+        # Note: in-place addition "x += attn_out" is NOT equivalent, and produces unexpected
+        # results. See https://github.com/pytorch/pytorch/issues/8212.
+        x = x + attn_out
         x = self.norm(x)
         return x
 
@@ -146,8 +198,10 @@ class EncoderLayer(nn.Module):
         self.attn = SelfAttention(d_model, num_heads, dropout_rate, **kwargs)
         self.ff = FeedForward(d_model, d_ff, dropout_rate, **kwargs)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.attn(x)
+    def forward(
+        self, x: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        x = self.attn(x, mask)
         x = self.ff(x)
         return x
 
@@ -175,12 +229,14 @@ class Encoder(nn.Module):
             for _ in range(num_layers)
         ]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         x = self.emb(x)
         x = self.pe(x)
         x = self.dropout(x)
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, mask)
         return x
 
 
@@ -200,9 +256,15 @@ class DecoderLayer(nn.Module):
         self.cross_attn = CrossAttention(d_model, num_heads, dropout_rate, **kwargs)
         self.ff = FeedForward(d_model, d_ff, dropout_rate, **kwargs)
 
-    def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
-        x = self.self_attn(x)
-        x = self.cross_attn(x, ctx)
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        ctx_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = self.self_attn(x, mask)
+        x = self.cross_attn(x, ctx, ctx_mask)
         x = self.ff(x)
         return x
 
@@ -230,12 +292,18 @@ class Decoder(nn.Module):
             for _ in range(num_layers)
         ]
 
-    def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        ctx_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         x = self.emb(x)
         x = self.pe(x)
         x = self.dropout(x)
         for layer in self.layers:
-            x = layer(x, ctx)
+            x = layer(x, ctx, mask, ctx_mask)
         return x
 
 
@@ -277,9 +345,15 @@ class Transformer(nn.Module):
         )
         self.linear = nn.Linear(d_model, d_out)
 
-    def forward(self, x: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
-        ctx = self.encoder(ctx)
-        x = self.decoder(x, ctx)
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        ctx_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        ctx = self.encoder(ctx, ctx_mask)
+        x = self.decoder(x, ctx, mask, ctx_mask)
         x = self.linear(x)
         return x
 
