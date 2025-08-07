@@ -49,7 +49,7 @@ class PositionalEncoding(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Handle both batched (B, L, d_model) and unbatched (L, d_model) cases
         seq_len = x.size(-2)
-        return x + self.pe[:seq_len, :]
+        return x + self.pe[:seq_len, :].to(x.device)
 
 
 class BaseAttention(nn.Module):
@@ -144,7 +144,7 @@ class CausalSelfAttention(BaseAttention):
         # Causal attention mask.
         seq_len = x.size(1)
         causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1
+            torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device), diagonal=1
         )
 
         attn_out, _ = self.mha(
@@ -224,10 +224,10 @@ class Encoder(nn.Module):
         self.emb = nn.Embedding(vocab_size, d_model)
         self.pe = PositionalEncoding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout_rate)
-        self.layers = [
+        self.layers = nn.ModuleList(
             EncoderLayer(d_model, d_ff, num_heads, dropout_rate, **kwargs)
             for _ in range(num_layers)
-        ]
+        )
 
     def forward(
         self, x: torch.Tensor, mask: torch.Tensor | None = None
@@ -287,10 +287,10 @@ class Decoder(nn.Module):
         self.emb = nn.Embedding(vocab_size, d_model)
         self.pe = PositionalEncoding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout_rate)
-        self.layers = [
+        self.layers = nn.ModuleList(
             DecoderLayer(d_model, d_ff, num_heads, dropout_rate, **kwargs)
             for _ in range(num_layers)
-        ]
+        )
 
     def forward(
         self,
@@ -448,20 +448,111 @@ def load_dataset(
 
 
 def main() -> None:
-    # Uncomment the following lines when torchtext is properly installed
-    train_loader, valid_loader, vocab_size = load_dataset(batch_size=16)
+    # Set device
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.mps.device_count() > 0:
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    print(f"Using device: {device}")
 
-    # Test the DataLoader
-    print("\nTesting DataLoader:")
-    for batch_idx, (src, tgt, src_mask, tgt_mask) in enumerate(train_loader):
-        print(f"Batch {batch_idx + 1}:")
-        print(f"  Batch size: {len(src)}")
-        print(f"  Sample German: {src[0]}")
-        print(f"  Sample English: {tgt[0]}")
-        print(f"  Sample src mask: {src_mask[0]}")
-        print(f"  Sample tgt mask: {tgt_mask[0]}")
-        if batch_idx >= 2:  # Only show first 3 batches
-            break
+    # Load dataset
+    train_loader, valid_loader, vocab_size = load_dataset(batch_size=16)
+    print(f"Vocabulary size: {vocab_size}")
+
+    # Initialize model
+    model = Transformer(
+        vocab_size=vocab_size,
+        d_model=256,
+        d_ff=1024,
+        d_out=vocab_size,
+        num_heads=4,
+        num_layers=4,
+        max_seq_len=64,
+        dropout_rate=0.1,
+    ).to(device)
+
+    # Initialize optimizer and loss function
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    criterion = nn.CrossEntropyLoss(ignore_index=0)  # 0 is padding token
+
+    # Training loop
+    num_epochs = 2
+    print(f"\nStarting training for {num_epochs} epochs...")
+
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        num_batches = 0
+
+        for batch_idx, (src, tgt, src_mask, tgt_mask) in enumerate(train_loader):
+            # Move data to device
+            src = src.to(device)
+            tgt = tgt.to(device)
+            src_mask = src_mask.to(device)
+            tgt_mask = tgt_mask.to(device)
+
+            # Forward pass
+            # For training, we use teacher forcing - input is tgt[:-1], target is tgt[1:]
+            tgt_input = tgt[:, :-1]  # Remove last token
+            tgt_target = tgt[:, 1:]  # Remove first token (BOS)
+            tgt_input_mask = tgt_mask[:, :-1]
+
+            optimizer.zero_grad()
+            output = model(tgt_input, src, tgt_input_mask, src_mask)
+
+            # Reshape output and target for loss calculation
+            output = output.view(-1, vocab_size)
+            target = tgt_target.reshape(-1)
+
+            # Calculate loss
+            loss = criterion(output, target)
+
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+            num_batches += 1
+
+            # Print progress every 100 batches
+            if batch_idx % 100 == 0:
+                print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+
+        # Calculate average loss for the epoch
+        avg_loss = total_loss / num_batches
+        print(f"Epoch {epoch+1} completed. Average loss: {avg_loss:.4f}")
+
+        # Validation
+        model.eval()
+        val_loss = 0
+        val_batches = 0
+
+        with torch.no_grad():
+            for src, tgt, src_mask, tgt_mask in valid_loader:
+                src = src.to(device)
+                tgt = tgt.to(device)
+                src_mask = src_mask.to(device)
+                tgt_mask = tgt_mask.to(device)
+
+                tgt_input = tgt[:, :-1]
+                tgt_target = tgt[:, 1:]
+                tgt_input_mask = tgt_mask[:, :-1]
+
+                output = model(tgt_input, src, tgt_input_mask, src_mask)
+                output = output.view(-1, vocab_size)
+                target = tgt_target.reshape(-1)
+
+                loss = criterion(output, target)
+                val_loss += loss.item()
+                val_batches += 1
+
+        avg_val_loss = val_loss / val_batches
+        print(f"Validation loss: {avg_val_loss:.4f}")
+        print("-" * 50)
+
+    print("Training completed!")
 
 
 if __name__ == "__main__":
