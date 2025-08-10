@@ -3,15 +3,12 @@ import unittest
 import torch
 
 from transformer import (
-    CausalSelfAttention,
-    CrossAttention,
     Decoder,
     DecoderLayer,
     Encoder,
     EncoderLayer,
     FeedForward,
     PositionalEncoding,
-    SelfAttention,
     Transformer,
 )
 
@@ -34,34 +31,6 @@ class PositionalEncodingTest(unittest.TestCase):
 
 
 class OutputShapeTest(unittest.TestCase):
-
-    def test_self_attention(self):
-        x = torch.rand((16, 102, 512))  # (batch, length, d_model)
-        attn = SelfAttention(
-            d_model=512,
-            num_heads=8,
-        )
-        output = attn(x)
-        self.assertEqual(output.shape, x.shape)
-
-    def test_cross_attention(self):
-        x = torch.rand((16, 102, 512))  # (batch, length, d_model)
-        ctx = torch.rand((16, 143, 512))  # (batch, length, d_model)
-        attn = CrossAttention(
-            d_model=512,
-            num_heads=8,
-        )
-        output = attn(x, ctx)
-        self.assertEqual(output.shape, x.shape)
-
-    def test_causal_self_attention(self):
-        x = torch.rand((16, 102, 512))  # (batch, length, d_model)
-        attn = CausalSelfAttention(
-            d_model=512,
-            num_heads=8,
-        )
-        output = attn(x)
-        self.assertEqual(output.shape, x.shape)
 
     def test_feed_forward(self):
         x = torch.rand((16, 102, 512))  # (batch, length, d_model)
@@ -166,30 +135,6 @@ class OutputShapeWithPaddingMaskTest(unittest.TestCase):
         self.ctx_mask = torch.ones((16, 143), dtype=torch.int)
         self.ctx_mask[:, 120:] = 0  # Last 23 context tokens are padding
 
-    def test_self_attention(self):
-        attn = SelfAttention(
-            d_model=512,
-            num_heads=8,
-        )
-        output = attn(self.x, self.mask)
-        self.assertEqual(output.shape, self.x.shape)
-
-    def test_cross_attention(self):
-        attn = CrossAttention(
-            d_model=512,
-            num_heads=8,
-        )
-        output = attn(self.x, self.ctx, self.ctx_mask)
-        self.assertEqual(output.shape, self.x.shape)
-
-    def test_causal_self_attention(self):
-        attn = CausalSelfAttention(
-            d_model=512,
-            num_heads=8,
-        )
-        output = attn(self.x, self.mask)
-        self.assertEqual(output.shape, self.x.shape)
-
     def test_encoder_layer(self):
         layer = EncoderLayer(
             d_model=512,
@@ -248,7 +193,7 @@ class OutputShapeWithPaddingMaskTest(unittest.TestCase):
 
 class AttentionMaskTest(unittest.TestCase):
 
-    def test_self_attention_padding_mask(self):
+    def test_encoder_layer_padding_mask(self):
         # Construct x1, x2 such that they are the same in the first few positions.
         x1 = torch.rand((2, 8, 4))  # (batch, length, d_model)
         x1[:, 6:, :] = 0.0
@@ -259,18 +204,46 @@ class AttentionMaskTest(unittest.TestCase):
         mask = torch.ones((2, 8), dtype=torch.int)
         mask[:, 6:] = 0
 
-        attn = SelfAttention(
+        layer = EncoderLayer(
             d_model=4,
+            d_ff=16,
             num_heads=2,
         )
         # Disable dropout, etc.
-        attn.eval()
+        layer.eval()
 
-        y1 = attn(x1, mask)
-        y2 = attn(x2, mask)
+        y1 = layer(x1, mask)
+        y2 = layer(x2, mask)
+        # The output for non-padded positions should be the same
         torch.testing.assert_close(y1[:, :6, :], y2[:, :6, :])
 
-    def test_cross_attention_padding_mask(self):
+    def test_decoder_layer_x_padding_mask(self):
+        # Construct x1, x2 such that they are the same in the first few positions.
+        x1 = torch.rand((2, 8, 4))  # (batch, length, d_model)
+        x1[:, 6:, :] = 0.0
+        x2 = x1.clone()
+        x2[:, 6:, :] = 1.0
+
+        # The remaining positions are marked as padding.
+        mask = torch.ones((2, 8), dtype=torch.int)
+        mask[:, 6:] = 0
+
+        ctx = torch.rand((2, 8, 4))  # (batch, ctx_length, d_model)
+
+        layer = DecoderLayer(
+            d_model=4,
+            d_ff=16,
+            num_heads=2,
+        )
+        # Disable dropout, etc.
+        layer.eval()
+
+        y1 = layer(x1, ctx, mask=mask)
+        y2 = layer(x2, ctx, mask=mask)
+        # The output for non-padded positions should be the same.
+        torch.testing.assert_close(y1[:, :6, :], y2[:, :6, :])
+
+    def test_decoder_layer_ctx_padding_mask(self):
         x = torch.rand((2, 8, 4))  # (batch, length, d_model)
 
         # Construct ctx1, ctx2 such that they are the same in the first few positions.
@@ -283,31 +256,43 @@ class AttentionMaskTest(unittest.TestCase):
         ctx_mask = torch.ones((2, 8), dtype=torch.int)
         ctx_mask[:, 6:] = 0
 
-        attn = CrossAttention(
+        layer = DecoderLayer(
             d_model=4,
+            d_ff=16,
             num_heads=2,
         )
         # Disable dropout, etc.
-        attn.eval()
+        layer.eval()
 
-        y1 = attn(x, ctx1, ctx_mask)
-        y2 = attn(x, ctx1, ctx_mask)
+        y1 = layer(x, ctx1, ctx_mask=ctx_mask)
+        y2 = layer(x, ctx2, ctx_mask=ctx_mask)
+        # The output should be the same since context padding shouldn't affect non-padded positions.
         torch.testing.assert_close(y1, y2)
 
-    def test_causal_self_attention_causal_mask(self):
-        x = torch.rand((2, 8, 4))  # (batch, length, d_model)
-        attn = CausalSelfAttention(
+    def test_decoder_layer_causal_mask(self):
+        # Construct x1, x2 such that they are the same in the first few positions.
+        x1 = torch.rand((2, 8, 4))  # (batch, length, d_model)
+        x1[:, 4:, :] = 1.0
+        x2 = x1.clone()
+        x2[:, 4:, :] = 0.0
+
+        ctx = torch.rand((2, 8, 4))  # (batch, ctx_length, d_model)
+
+        layer = DecoderLayer(
             d_model=4,
+            d_ff=16,
             num_heads=2,
         )
         # Disable dropout, etc.
-        attn.eval()
+        layer.eval()
 
-        # The output for early positions shouldn't depend on the later ones, so it shouldn't matter
-        # whether we trim elements before or after the layer.
-        y1 = attn(x[:, :4, :])
-        y2 = attn(x)[:, :4, :]
-        torch.testing.assert_close(y1, y2)
+        # Test that causal masking works: changing later positions shouldn't affect earlier outputs
+        y1 = layer(x1, ctx)
+        y2 = layer(x2, ctx)
+
+        # The first 4 positions should be identical since causal masking prevents later positions
+        # from affecting earlier ones.
+        torch.testing.assert_close(y1[:, :4, :], y2[:, :4, :])
 
 
 if __name__ == "__main__":

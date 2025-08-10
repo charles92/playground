@@ -52,117 +52,6 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:seq_len, :].to(x.device)
 
 
-class BaseAttention(nn.Module):
-    """Base attention module with multi-head attention and layer normalization."""
-
-    def __init__(
-        self, d_model: int, num_heads: int, dropout_rate: float = 0.1, **kwargs
-    ):
-        super().__init__(**kwargs)
-        self.mha = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=num_heads,
-            dropout=dropout_rate,
-            batch_first=True,
-        )
-        self.norm = nn.LayerNorm(d_model)
-
-
-class SelfAttention(BaseAttention):
-    """Self-attention mechanism that attends to the same sequence."""
-
-    def forward(
-        self, x: torch.Tensor, mask: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Forward pass.
-
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, d_model).
-            mask: Padding mask of shape (batch_size, seq_len), where 1 indicates a valid token and
-                0 indicates padding.
-        """
-        if mask is not None:
-            # MHA's key_padding_mask expects True to mark padding (invalid) tokens.
-            mask = ~mask.bool()
-        attn_out, _ = self.mha(
-            query=x, key=x, value=x, key_padding_mask=mask, need_weights=False
-        )
-        # Note: in-place addition "x += attn_out" is NOT equivalent, and produces unexpected
-        # results. See https://github.com/pytorch/pytorch/issues/8212.
-        x = x + attn_out
-        x = self.norm(x)
-        return x
-
-
-class CrossAttention(BaseAttention):
-    """Cross-attention mechanism that attends to a different context sequence."""
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        ctx: torch.Tensor,
-        ctx_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Forward pass.
-
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, d_model).
-            ctx: Context tensor of shape (batch_size, ctx_len, d_model).
-            ctx_mask: Padding mask of shape (batch_size, ctx_len), where 1 indicates a valid token
-                and 0 indicates padding.
-        """
-        if ctx_mask is not None:
-            # MHA's key_padding_mask expects True to mark padding (invalid) tokens.
-            ctx_mask = ~ctx_mask.bool()
-        attn_out, _ = self.mha(
-            query=x, key=ctx, value=ctx, key_padding_mask=ctx_mask, need_weights=False
-        )
-        # Note: in-place addition "x += attn_out" is NOT equivalent, and produces unexpected
-        # results. See https://github.com/pytorch/pytorch/issues/8212.
-        x = x + attn_out
-        x = self.norm(x)
-        return x
-
-
-class CausalSelfAttention(BaseAttention):
-    """Causal self-attention mechanism with masking for autoregressive generation."""
-
-    def forward(
-        self, x: torch.Tensor, mask: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """Forward pass.
-
-        Args:
-            x: Input tensor of shape (batch_size, seq_len, d_model).
-            mask: Padding mask of shape (batch_size, seq_len), where 1 indicates a valid token and
-                0 indicates padding.
-        """
-        if mask is not None:
-            # MHA's key_padding_mask expects True to mark padding (invalid) tokens.
-            mask = ~mask.bool()
-
-        # Causal attention mask.
-        seq_len = x.size(1)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device), diagonal=1
-        )
-
-        attn_out, _ = self.mha(
-            query=x,
-            key=x,
-            value=x,
-            key_padding_mask=mask,
-            need_weights=False,
-            attn_mask=causal_mask,
-            is_causal=True,
-        )
-        # Note: in-place addition "x += attn_out" is NOT equivalent, and produces unexpected
-        # results. See https://github.com/pytorch/pytorch/issues/8212.
-        x = x + attn_out
-        x = self.norm(x)
-        return x
-
-
 class FeedForward(nn.Module):
     """Feed-forward network with residual connection and layer normalization."""
 
@@ -195,14 +84,38 @@ class EncoderLayer(nn.Module):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.attn = SelfAttention(d_model, num_heads, dropout_rate, **kwargs)
+        self.self_attn = nn.MultiheadAttention(
+            d_model, num_heads, dropout_rate, batch_first=True
+        )
+        self.norm = nn.LayerNorm(d_model)
         self.ff = FeedForward(d_model, d_ff, dropout_rate, **kwargs)
 
     def forward(
         self, x: torch.Tensor, mask: torch.Tensor | None = None
     ) -> torch.Tensor:
-        x = self.attn(x, mask)
+        """Forward pass.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, d_model).
+            mask: Validity mask of shape (batch_size, seq_len), where 0 means invalid.
+
+        Returns:
+            Output tensor of shape (batch_size, seq_len, d_model).
+        """
+        # Convert validity mask (0 means invalid - ignored) to padding mask (true means padding -
+        # ignored).
+        if mask is not None:
+            mask = ~mask.bool()
+
+        # Global self-attention.
+        attn_out, _ = self.self_attn(
+            query=x, key=x, value=x, key_padding_mask=mask, need_weights=False
+        )
+        x = self.norm(x + attn_out)
+
+        # Feed-forward.
         x = self.ff(x)
+
         return x
 
 
@@ -252,8 +165,14 @@ class DecoderLayer(nn.Module):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.self_attn = CausalSelfAttention(d_model, num_heads, dropout_rate, **kwargs)
-        self.cross_attn = CrossAttention(d_model, num_heads, dropout_rate, **kwargs)
+        self.self_attn = nn.MultiheadAttention(
+            d_model, num_heads, dropout_rate, batch_first=True
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.cross_attn = nn.MultiheadAttention(
+            d_model, num_heads, dropout_rate, batch_first=True
+        )
+        self.norm2 = nn.LayerNorm(d_model)
         self.ff = FeedForward(d_model, d_ff, dropout_rate, **kwargs)
 
     def forward(
@@ -263,9 +182,55 @@ class DecoderLayer(nn.Module):
         mask: torch.Tensor | None = None,
         ctx_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self.self_attn(x, mask)
-        x = self.cross_attn(x, ctx, ctx_mask)
+        """Forward pass.
+
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, d_model).
+            ctx: Context tensor of shape (batch_size, ctx_seq_len, d_model).
+            mask: Validity mask of shape (batch_size, seq_len), where 0 means invalid.
+            ctx_mask: Validity mask of shape (batch_size, ctx_seq_len), where 0 means invalid.
+
+        Returns:
+            Output tensor of shape (batch_size, seq_len, d_model).
+        """
+        # Convert validity mask (0 means invalid - ignored) to padding mask (true means padding -
+        # ignored).
+        if mask is not None:
+            mask = ~mask.bool()
+        if ctx_mask is not None:
+            ctx_mask = ~ctx_mask.bool()
+
+        # Causal self-attention.
+        seq_len = x.size(1)
+        causal_mask = torch.triu(
+            torch.ones(
+                seq_len, seq_len, dtype=torch.bool, device=x.device, requires_grad=False
+            ),
+            diagonal=1,
+        )
+        attn_out, _ = self.self_attn(
+            query=x,
+            key=x,
+            value=x,
+            key_padding_mask=mask,
+            attn_mask=causal_mask,
+            need_weights=False,
+        )
+        x = self.norm1(x + attn_out)
+
+        # Cross-attention.
+        attn_out, _ = self.cross_attn(
+            query=x,
+            key=ctx,
+            value=ctx,
+            key_padding_mask=ctx_mask,
+            need_weights=False,
+        )
+        x = self.norm2(x + attn_out)
+
+        # Feed-forward.
         x = self.ff(x)
+
         return x
 
 
