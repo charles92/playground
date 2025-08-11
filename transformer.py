@@ -202,12 +202,10 @@ class DecoderLayer(nn.Module):
 
         # Causal self-attention.
         seq_len = x.size(1)
-        causal_mask = torch.triu(
-            torch.ones(
-                seq_len, seq_len, dtype=torch.bool, device=x.device, requires_grad=False
-            ),
-            diagonal=1,
-        )
+        causal_mask = torch.ones(
+            seq_len, seq_len, dtype=torch.bool, device=x.device, requires_grad=False
+        ).triu(diagonal=1)
+
         attn_out, _ = self.self_attn(
             query=x,
             key=x,
