@@ -463,14 +463,14 @@ def main() -> None:
             tgt_input_mask = tgt_mask[:, :-1]
 
             optimizer.zero_grad()
-            output = model(tgt_input, src, tgt_input_mask, src_mask)
+            logits = model(tgt_input, src, tgt_input_mask, src_mask)
 
             # Reshape output and target for loss calculation
-            output = output.view(-1, vocab_size)
-            target = tgt_target.reshape(-1)
+            logits = logits.view(-1, vocab_size)  # (B * L, vocab_size)
+            labels = tgt_target.reshape(-1)  # (B * L)
 
             # Calculate loss
-            loss = criterion(output, target)
+            loss = criterion(logits, labels)
 
             # Backward pass
             loss.backward()
@@ -503,11 +503,11 @@ def main() -> None:
                 tgt_target = tgt[:, 1:]
                 tgt_input_mask = tgt_mask[:, :-1]
 
-                output = model(tgt_input, src, tgt_input_mask, src_mask)
-                output = output.view(-1, vocab_size)
-                target = tgt_target.reshape(-1)
+                logits = model(tgt_input, src, tgt_input_mask, src_mask)
+                logits = logits.view(-1, vocab_size)
+                labels = tgt_target.reshape(-1)
 
-                loss = criterion(output, target)
+                loss = criterion(logits, labels)
                 val_loss += loss.item()
                 val_batches += 1
 
