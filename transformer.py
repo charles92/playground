@@ -29,6 +29,110 @@ import torch.nn as nn
 import transformers
 from torch.utils import data
 
+# TODO: Learned positional encoding.
+
+
+class MultiHeadAttention(nn.Module):
+    """Hand-crafted multi-head attention."""
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        *,
+        d_key: int | None = None,
+        d_value: int | None = None,
+        dropout_rate: float = 0.1,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+
+        # Use default Q, K, V dimensions if not specified.
+        d_head = d_model // num_heads
+        self.d_qk = d_key or d_head
+        self.d_v = d_value or d_head
+
+        # Linear projections for query, key, and value. The projection matrices already take into
+        # account the multi-head concatenation. Hence the `num_heads` factor.
+        self.q_proj = nn.Linear(d_model, self.d_qk * num_heads)
+        self.k_proj = nn.Linear(d_model, self.d_qk * num_heads)
+        self.v_proj = nn.Linear(d_model, self.d_v * num_heads)
+
+        # Linear projection for the output.
+        self.o_proj = nn.Linear(self.d_v * num_heads, d_model)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None,
+        attn_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            query: Query tensor of shape (batch_size, q_len, d_model).
+            key: Key tensor of shape (batch_size, kv_len, d_model).
+            value: Value tensor of shape (batch_size, kv_len, d_model).
+            key_padding_mask: Validity mask of shape (batch_size, kv_len) indicating which entries
+              in the key are invalid (e.g., padding). For boolean masks, true indicates that
+              position will be ignored for the purpose of attention. For float masks, the mask
+              values are added directly to the pre-softmax attention scores.
+            attn_mask: Attention mask of shape (batch_size, q_len, kv_len). Both boolean and float
+              masks are supported, similar to `key_padding_mask`.
+
+        Returns:
+            Output tensor of shape (batch_size, q_len, d_model).
+        """
+        batch_size, q_len, _ = query.size()
+        _, kv_len, _ = key.size()
+
+        q = self.q_proj(query)  # (B, q_len, d_qk * num_heads)
+        k = self.k_proj(key)  # (B, kv_len, d_qk * num_heads)
+        v = self.v_proj(value)  # (B, kv_len, d_v * num_heads)
+
+        # Transpose q & k such that the first two dimensions are (B, num_heads), and the last two
+        # dimensions are dot-producted.
+        q = q.view(batch_size, q_len, self.num_heads, self.d_qk).transpose(-2, -3)
+        k = k.view(batch_size, kv_len, self.num_heads, self.d_qk).transpose(-2, -3)
+
+        # (B, num_heads, q_len, kv_len)
+        attn_score = (q @ k.transpose(-1, -2)) * torch.rsqrt(
+            torch.tensor(self.d_qk, dtype=torch.float32, device=query.device)
+        )
+
+        # Process attention masks.
+        if attn_mask is None:
+            attn_mask = torch.zeros(batch_size, q_len, kv_len, device=query.device)
+        elif attn_mask.dtype == torch.bool:
+            attn_mask = torch.where(attn_mask, -torch.inf, 0.0)
+        if key_padding_mask is not None:
+            if key_padding_mask.dtype == torch.bool:
+                key_padding_mask = torch.where(key_padding_mask, -torch.inf, 0.0)
+            key_padding_mask = key_padding_mask.unsqueeze(-2)  # (B, 1, kv_len)
+            attn_mask = attn_mask + key_padding_mask
+
+        # Compute final attention scores.
+        attn_mask = attn_mask.unsqueeze(-3)  # (B, 1, q_len, kv_len)
+        attn_score = torch.softmax(
+            attn_score + attn_mask, dim=-1
+        )  # (B, num_heads, q_len, kv_len)
+
+        # Transpose v to (B, num_heads, kv_len, d_v).
+        v = v.view(batch_size, kv_len, self.num_heads, self.d_v).transpose(-2, -3)
+
+        # Apply attention scores to the value vectors, concatenate the heads, and project to the
+        # output dimension.
+        output = attn_score @ v  # (B, num_heads, q_len, d_v)
+        output = output.transpose(-2, -3).reshape(
+            batch_size, q_len, self.d_v * self.num_heads
+        )
+        output = self.o_proj(output)
+
+        return output
+
 
 class PositionalEncoding(nn.Module):
     """Positional encoding for the transformer model."""
@@ -84,8 +188,8 @@ class EncoderLayer(nn.Module):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.self_attn = nn.MultiheadAttention(
-            d_model, num_heads, dropout_rate, batch_first=True
+        self.self_attn = MultiHeadAttention(
+            d_model, num_heads, dropout_rate=dropout_rate, **kwargs
         )
         self.norm = nn.LayerNorm(d_model)
         self.ff = FeedForward(d_model, d_ff, dropout_rate, **kwargs)
@@ -108,9 +212,7 @@ class EncoderLayer(nn.Module):
             mask = ~mask.bool()
 
         # Global self-attention.
-        attn_out, _ = self.self_attn(
-            query=x, key=x, value=x, key_padding_mask=mask, need_weights=False
-        )
+        attn_out = self.self_attn(query=x, key=x, value=x, key_padding_mask=mask)
         x = self.norm(x + attn_out)
 
         # Feed-forward.
@@ -165,12 +267,12 @@ class DecoderLayer(nn.Module):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.self_attn = nn.MultiheadAttention(
-            d_model, num_heads, dropout_rate, batch_first=True
+        self.self_attn = MultiHeadAttention(
+            d_model, num_heads, dropout_rate=dropout_rate, **kwargs
         )
         self.norm1 = nn.LayerNorm(d_model)
-        self.cross_attn = nn.MultiheadAttention(
-            d_model, num_heads, dropout_rate, batch_first=True
+        self.cross_attn = MultiHeadAttention(
+            d_model, num_heads, dropout_rate=dropout_rate, **kwargs
         )
         self.norm2 = nn.LayerNorm(d_model)
         self.ff = FeedForward(d_model, d_ff, dropout_rate, **kwargs)
@@ -206,23 +308,21 @@ class DecoderLayer(nn.Module):
             seq_len, seq_len, dtype=torch.bool, device=x.device, requires_grad=False
         ).triu(diagonal=1)
 
-        attn_out, _ = self.self_attn(
+        attn_out = self.self_attn(
             query=x,
             key=x,
             value=x,
             key_padding_mask=mask,
             attn_mask=causal_mask,
-            need_weights=False,
         )
         x = self.norm1(x + attn_out)
 
         # Cross-attention.
-        attn_out, _ = self.cross_attn(
+        attn_out = self.cross_attn(
             query=x,
             key=ctx,
             value=ctx,
             key_padding_mask=ctx_mask,
-            need_weights=False,
         )
         x = self.norm2(x + attn_out)
 

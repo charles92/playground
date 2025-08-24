@@ -7,9 +7,139 @@ from transformer import (
     Encoder,
     EncoderLayer,
     FeedForward,
+    MultiHeadAttention,
     PositionalEncoding,
     Transformer,
 )
+
+
+@pytest.mark.parametrize("q_len", [10, 20])
+@pytest.mark.parametrize("kv_len", [10, 20])
+@pytest.mark.parametrize("num_heads", [1, 4])
+def test_mha_output_shape(q_len, kv_len, num_heads):
+    batch_size, d_model = 4, 64
+    mha = MultiHeadAttention(d_model=d_model, num_heads=num_heads)
+    mha.eval()
+
+    q = torch.randn(batch_size, q_len, d_model)
+    k = torch.randn(batch_size, kv_len, d_model)
+    v = torch.randn(batch_size, kv_len, d_model)
+
+    output = mha(q, k, v)
+
+    assert output.shape == (batch_size, q_len, d_model)
+
+
+@pytest.mark.parametrize("d_key", [16, 32])
+@pytest.mark.parametrize("d_value", [16, 32])
+def test_mha_custom_qkv_dimensions_output_shape(d_key, d_value):
+    batch_size, d_model = 4, 64
+    q_len, kv_len = 10, 20
+
+    mha = MultiHeadAttention(d_model=d_model, num_heads=8, d_key=d_key, d_value=d_value)
+    mha.eval()
+
+    # Check that custom dimensions are set correctly
+    assert mha.d_qk == d_key
+    assert mha.d_v == d_value
+
+    q = torch.randn(batch_size, q_len, d_model)
+    k = torch.randn(batch_size, kv_len, d_model)
+    v = torch.randn(batch_size, kv_len, d_model)
+
+    output = mha(q, k, v)
+
+    # Check output shape
+    assert output.shape == (batch_size, q_len, d_model)
+
+
+@pytest.mark.parametrize(
+    "mask",
+    [
+        torch.tensor([[False, False, True, True]] * 2, dtype=torch.bool),
+        torch.tensor([[0.0, 0.0, -torch.inf, -torch.inf]] * 2, dtype=torch.float32),
+    ],
+)
+def test_mha_padding_mask(mask):
+    batch_size, seq_len, d_model = 2, 4, 64
+    num_heads = 8
+
+    mha = MultiHeadAttention(d_model=d_model, num_heads=num_heads)
+    mha.eval()
+
+    q = torch.randn(batch_size, seq_len, d_model)
+    k = torch.randn(batch_size, seq_len, d_model)
+    v = torch.randn(batch_size, seq_len, d_model)
+
+    y = mha(q, k, v, key_padding_mask=mask)
+
+    # Tweaking the masked part of the key shouldn't affect the output.
+    masked_k = k.clone()
+    masked_k[:, 2:, :] = 0.0
+    y_masked_k = mha(q, masked_k, v, key_padding_mask=mask)
+    assert torch.allclose(y, y_masked_k)
+
+    # Tweaking the masked part of the value shouldn't affect the output.
+    masked_v = v.clone()
+    masked_v[:, 2:, :] = 0.0
+    y_masked_v = mha(q, k, masked_v, key_padding_mask=mask)
+    assert torch.allclose(y, y_masked_v)
+
+
+@pytest.mark.parametrize(
+    "mask",
+    [
+        torch.ones(10, 10, dtype=torch.bool).triu(diagonal=1),
+        torch.full((10, 10), -torch.inf, dtype=torch.float32).triu(diagonal=1),
+    ],
+)
+def test_mha_bool_causal_attention_mask(mask):
+    batch_size, seq_len, d_model = 4, 10, 64
+    num_heads = 8
+
+    mha = MultiHeadAttention(d_model=d_model, num_heads=num_heads)
+    mha.eval()
+
+    q = torch.randn(batch_size, seq_len, d_model)
+    k = torch.randn(batch_size, seq_len, d_model)
+    v = torch.randn(batch_size, seq_len, d_model)
+
+    y = mha(q, k, v, attn_mask=mask)
+
+    # Tweaking the second half of the key shouldn't affect the first half of the output.
+    masked_k = k.clone()
+    masked_k[:, -3:, :] = 0.0
+    y_masked_k = mha(q, masked_k, v, attn_mask=mask)
+    assert torch.allclose(y[:, :-3, :], y_masked_k[:, :-3, :])
+    assert not torch.allclose(y[:, -3:, :], y_masked_k[:, -3:, :])
+
+    # Tweaking the second half of the value shouldn't affect the first half of the output.
+    masked_v = v.clone()
+    masked_v[:, -3:, :] = 0.0
+    y_masked_v = mha(q, k, masked_v, attn_mask=mask)
+    assert torch.allclose(y[:, :-3, :], y_masked_v[:, :-3, :])
+    assert not torch.allclose(y[:, -3:, :], y_masked_v[:, -3:, :])
+
+
+def test_mha_gradients():
+    batch_size, seq_len, d_model = 4, 10, 64
+
+    mha = MultiHeadAttention(d_model=d_model, num_heads=8)
+
+    query = torch.randn(batch_size, seq_len, d_model, requires_grad=True)
+    key = torch.randn(batch_size, seq_len, d_model, requires_grad=True)
+    value = torch.randn(batch_size, seq_len, d_model, requires_grad=True)
+
+    y = mha(query, key, value)
+
+    # Compute loss and gradients
+    loss = y.sum()
+    loss.backward()
+
+    # Check gradient shapes
+    assert query.grad.shape == query.shape
+    assert key.grad.shape == key.shape
+    assert value.grad.shape == value.shape
 
 
 def test_positional_encoding_unbatched():
