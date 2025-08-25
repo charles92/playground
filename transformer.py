@@ -134,8 +134,8 @@ class MultiHeadAttention(nn.Module):
         return output
 
 
-class PositionalEncoding(nn.Module):
-    """Positional encoding for the transformer model."""
+class SinusoidalPositionalEncoding(nn.Module):
+    """Original sinusoidal positional encoding for the transformer model."""
 
     def __init__(self, max_seq_len: int, d_model: int, **kwargs):
         super().__init__(**kwargs)
@@ -154,6 +154,21 @@ class PositionalEncoding(nn.Module):
         # Handle both batched (B, L, d_model) and unbatched (L, d_model) cases
         seq_len = x.size(-2)
         return x + self.pe[:seq_len, :].to(x.device)
+
+
+class TrainablePositionalEncoding(nn.Module):
+    """Learned positional encoding for the transformer model."""
+
+    def __init__(self, max_seq_len: int, d_model: int, **kwargs):
+        super().__init__(**kwargs)
+        self.pe = nn.Embedding(max_seq_len, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        seq_len = x.size(-2)
+        positions = torch.arange(seq_len, device=x.device)
+        if x.dim() > 2:
+            positions = positions[None, :]  # (1, seq_len)
+        return x + self.pe(positions)
 
 
 class FeedForward(nn.Module):
@@ -237,7 +252,7 @@ class Encoder(nn.Module):
     ):
         super().__init__(**kwargs)
         self.emb = nn.Embedding(vocab_size, d_model)
-        self.pe = PositionalEncoding(max_seq_len, d_model)
+        self.pe = TrainablePositionalEncoding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout_rate)
         self.layers = nn.ModuleList(
             EncoderLayer(d_model, d_ff, num_heads, dropout_rate, **kwargs)
@@ -348,7 +363,7 @@ class Decoder(nn.Module):
     ):
         super().__init__(**kwargs)
         self.emb = nn.Embedding(vocab_size, d_model)
-        self.pe = PositionalEncoding(max_seq_len, d_model)
+        self.pe = TrainablePositionalEncoding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout_rate)
         self.layers = nn.ModuleList(
             DecoderLayer(d_model, d_ff, num_heads, dropout_rate, **kwargs)

@@ -8,7 +8,8 @@ from transformer import (
     EncoderLayer,
     FeedForward,
     MultiHeadAttention,
-    PositionalEncoding,
+    SinusoidalPositionalEncoding,
+    TrainablePositionalEncoding,
     Transformer,
 )
 
@@ -142,20 +143,36 @@ def test_mha_gradients():
     assert value.grad.shape == value.shape
 
 
-def test_positional_encoding_unbatched():
-    seq_length, d_model = 100, 512
-    x = torch.randn(seq_length, d_model)
-    y = PositionalEncoding(seq_length, d_model)(x)
-    assert y.shape == (seq_length, d_model)
+@pytest.mark.parametrize(
+    "ctor", [SinusoidalPositionalEncoding, TrainablePositionalEncoding]
+)
+@pytest.mark.parametrize("seq_length", [1, 4, 8])
+def test_positional_encoding_unbatched(ctor, seq_length):
+    layer = ctor(8, 16)
+    layer.eval()
+
+    x = torch.randn(seq_length, 16)
+    y = layer(x)
+    assert y.shape == x.shape
     assert torch.norm(y - x) > 0
 
 
-def test_positional_encoding_batched():
-    batch_size, seq_length, d_model = 4, 100, 512
-    x = torch.randn(batch_size, seq_length, d_model)
-    y = PositionalEncoding(seq_length, d_model)(x)
-    assert y.shape == (batch_size, seq_length, d_model)
-    assert torch.norm(y - x) > 0
+@pytest.mark.parametrize(
+    "ctor", [SinusoidalPositionalEncoding, TrainablePositionalEncoding]
+)
+@pytest.mark.parametrize("seq_length", [1, 4, 8])
+def test_positional_encoding_batched(ctor, seq_length):
+    layer = ctor(8, 16)
+    layer.eval()
+
+    x = torch.randn(4, seq_length, 16)
+    y = layer(x)
+    assert y.shape == x.shape
+
+    encoding = y - x
+    print(encoding)
+    assert torch.norm(encoding) > 0
+    assert torch.allclose(encoding[0, ...], encoding[1, ...], atol=1e-6)
 
 
 def test_feed_forward_output_shape():
