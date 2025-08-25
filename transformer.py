@@ -29,8 +29,6 @@ import torch.nn as nn
 import transformers
 from torch.utils import data
 
-# TODO: Learned positional encoding.
-
 
 class MultiHeadAttention(nn.Module):
     """Hand-crafted multi-head attention."""
