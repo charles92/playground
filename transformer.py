@@ -62,6 +62,9 @@ class MultiHeadAttention(nn.Module):
         # Linear projection for the output.
         self.o_proj = nn.Linear(self.d_v * num_heads, d_model)
 
+        # Output dropout.
+        self.dropout = nn.Dropout(dropout_rate)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -130,6 +133,7 @@ class MultiHeadAttention(nn.Module):
             batch_size, q_len, self.d_v * self.num_heads
         )
         output = self.o_proj(output)
+        output = self.dropout(output)
 
         return output
 
