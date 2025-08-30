@@ -87,14 +87,7 @@ def test_mha_padding_mask(mask):
     assert torch.allclose(y, y_masked_v)
 
 
-@pytest.mark.parametrize(
-    "mask",
-    [
-        torch.ones(10, 10, dtype=torch.bool).triu(diagonal=1),
-        torch.full((10, 10), -torch.inf, dtype=torch.float32).triu(diagonal=1),
-    ],
-)
-def test_mha_bool_causal_attention_mask(mask):
+def test_mha_causal_attention_mask():
     batch_size, seq_len, d_model = 4, 10, 64
     num_heads = 8
 
@@ -105,19 +98,19 @@ def test_mha_bool_causal_attention_mask(mask):
     k = torch.randn(batch_size, seq_len, d_model)
     v = torch.randn(batch_size, seq_len, d_model)
 
-    y = mha(q, k, v, attn_mask=mask)
+    y = mha(q, k, v, is_causal=True)
 
     # Tweaking the second half of the key shouldn't affect the first half of the output.
     masked_k = k.clone()
     masked_k[:, -3:, :] = 0.0
-    y_masked_k = mha(q, masked_k, v, attn_mask=mask)
+    y_masked_k = mha(q, masked_k, v, is_causal=True)
     assert torch.allclose(y[:, :-3, :], y_masked_k[:, :-3, :])
     assert not torch.allclose(y[:, -3:, :], y_masked_k[:, -3:, :])
 
     # Tweaking the second half of the value shouldn't affect the first half of the output.
     masked_v = v.clone()
     masked_v[:, -3:, :] = 0.0
-    y_masked_v = mha(q, k, masked_v, attn_mask=mask)
+    y_masked_v = mha(q, k, masked_v, is_causal=True)
     assert torch.allclose(y[:, :-3, :], y_masked_v[:, :-3, :])
     assert not torch.allclose(y[:, -3:, :], y_masked_v[:, -3:, :])
 
@@ -141,6 +134,68 @@ def test_mha_gradients():
     assert query.grad.shape == query.shape
     assert key.grad.shape == key.shape
     assert value.grad.shape == value.shape
+
+
+@pytest.mark.parametrize("is_causal", [False, True])
+def test_mha_kv_cache_is_updated(is_causal):
+    batch_size, d_model = 4, 64
+
+    mha = MultiHeadAttention(d_model=d_model, num_heads=8)
+    mha.eval()
+    q = torch.randn(batch_size, 1, d_model)
+    k = torch.randn(batch_size, 1, d_model)
+    v = torch.randn(batch_size, 1, d_model)
+
+    max_cache_len = 10
+    k_cache = torch.randn(batch_size, mha.num_heads, max_cache_len, mha.d_qk)
+    v_cache = torch.randn(batch_size, mha.num_heads, max_cache_len, mha.d_v)
+    k_cache_0 = k_cache.clone()
+    v_cache_0 = v_cache.clone()
+
+    # The first time step updates the first entry in the cache.
+    mha(q, k, v, cache_len=0, k_cache=k_cache, v_cache=v_cache, is_causal=is_causal)
+    assert not torch.allclose(k_cache[:, :, 0, :], k_cache_0[:, :, 0, :])
+    assert not torch.allclose(v_cache[:, :, 0, :], v_cache_0[:, :, 0, :])
+    assert torch.allclose(k_cache[:, :, 1:, :], k_cache_0[:, :, 1:, :])
+    assert torch.allclose(v_cache[:, :, 1:, :], v_cache_0[:, :, 1:, :])
+
+    # The second time step updates the second entry only.
+    k_cache_1 = k_cache.clone()
+    v_cache_1 = v_cache.clone()
+    mha(q, k, v, cache_len=1, k_cache=k_cache, v_cache=v_cache, is_causal=is_causal)
+    assert not torch.allclose(k_cache[:, :, 1, :], k_cache_1[:, :, 1, :])
+    assert not torch.allclose(v_cache[:, :, 1, :], v_cache_1[:, :, 1, :])
+    assert torch.allclose(k_cache[:, :, 0, :], k_cache_1[:, :, 0, :])
+    assert torch.allclose(v_cache[:, :, 0, :], v_cache_1[:, :, 0, :])
+    assert torch.allclose(k_cache[:, :, 2:, :], k_cache_1[:, :, 2:, :])
+    assert torch.allclose(v_cache[:, :, 2:, :], v_cache_1[:, :, 2:, :])
+
+
+@pytest.mark.parametrize("is_causal", [False, True])
+def test_mha_kv_cache_affects_output(is_causal):
+    batch_size, d_model = 4, 64
+
+    mha = MultiHeadAttention(d_model=d_model, num_heads=8)
+    mha.eval()
+    q = torch.randn(batch_size, 1, d_model)
+    k = torch.randn(batch_size, 1, d_model)
+    v = torch.randn(batch_size, 1, d_model)
+
+    max_cache_len = 10
+    k_cache_0 = torch.randn(batch_size, mha.num_heads, max_cache_len, mha.d_qk)
+    v_cache_0 = torch.randn(batch_size, mha.num_heads, max_cache_len, mha.d_v)
+    k_cache_1 = k_cache_0.clone()
+    k_cache_1[:, :, 0, :] = 0.0
+    v_cache_1 = v_cache_0.clone()
+    v_cache_1[:, :, 0, :] = 0.0
+
+    y0 = mha(
+        q, k, v, cache_len=1, k_cache=k_cache_0, v_cache=v_cache_0, is_causal=is_causal
+    )
+    y1 = mha(
+        q, k, v, cache_len=1, k_cache=k_cache_1, v_cache=v_cache_1, is_causal=is_causal
+    )
+    assert not torch.allclose(y0, y1)
 
 
 @pytest.mark.parametrize(

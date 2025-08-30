@@ -69,7 +69,10 @@ class MultiHeadAttention(nn.Module):
         key: torch.Tensor,
         value: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
-        attn_mask: torch.Tensor | None = None,
+        is_causal: bool = False,
+        cache_len: int = 0,
+        k_cache: torch.Tensor | None = None,
+        v_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass.
 
@@ -81,8 +84,14 @@ class MultiHeadAttention(nn.Module):
               in the key are invalid (e.g., padding). For boolean masks, true indicates that
               position will be ignored for the purpose of attention. For float masks, the mask
               values are added directly to the pre-softmax attention scores.
-            attn_mask: Attention mask of shape (batch_size, q_len, kv_len). Both boolean and float
-              masks are supported, similar to `key_padding_mask`.
+            is_causal: Whether to apply a causal mask to the attention scores.
+            cache_len: Length of the context that's already been cached in `k_cache` and `v_cache`.
+            k_cache: Cached key tensor for previous timesteps. Shape (batch_size, num_heads,
+              cache_len, d_qk). Keys from timesteps [0:cache_len] will be read directly
+              from k_cache[:, :, :cache_len, :]. New keys computed for the current timestep
+              are added to k_cache[:, :, cache_len:, :].
+            v_cache: Cached value tensor for previous timesteps. Shape (batch_size, num_heads,
+              cache_len, d_v). Operates similarly to `k_cache`, but for values.
 
         Returns:
             Output tensor of shape (batch_size, q_len, d_model).
@@ -94,35 +103,48 @@ class MultiHeadAttention(nn.Module):
         k = self.k_proj(key)  # (B, kv_len, d_qk * num_heads)
         v = self.v_proj(value)  # (B, kv_len, d_v * num_heads)
 
-        # Transpose q & k such that the first two dimensions are (B, num_heads), and the last two
-        # dimensions are dot-producted.
+        # Transpose q, k, and v such that the first two dimensions are (B, num_heads).
         q = q.view(batch_size, q_len, self.num_heads, self.d_qk).transpose(-2, -3)
         k = k.view(batch_size, kv_len, self.num_heads, self.d_qk).transpose(-2, -3)
+        v = v.view(batch_size, kv_len, self.num_heads, self.d_v).transpose(-2, -3)
 
-        # (B, num_heads, q_len, kv_len)
+        # Read & update KV cache.
+        if k_cache is not None and v_cache is not None:
+            kv_len = cache_len + kv_len
+            k_cache[:, :, cache_len:kv_len, :] = k
+            v_cache[:, :, cache_len:kv_len, :] = v
+            k = k_cache[:, :, :kv_len, :]
+            v = v_cache[:, :, :kv_len, :]
+
+        # (B, num_heads, q_len, kv_len).
         attn_score = (q @ k.transpose(-1, -2)) * torch.rsqrt(
             torch.tensor(self.d_qk, dtype=torch.float32, device=query.device)
         )
 
         # Process attention masks.
-        if attn_mask is None:
-            attn_mask = torch.zeros(batch_size, q_len, kv_len, device=query.device)
-        elif attn_mask.dtype == torch.bool:
-            attn_mask = torch.where(attn_mask, -torch.inf, 0.0)
+        attn_mask = torch.zeros(batch_size, q_len, kv_len, device=query.device)
+        if is_causal:
+            # Create a square upper triangular causal mask, and truncate to the last q_len
+            # positions. When the KV cache is inactive (e.g., during training), q_len == kv_len for
+            # causal self-attention, and this truncation is a no-op. When the KV cache is active,
+            # we only care about the last q_len rows of the causal attention mask.
+            causal_mask = torch.ones(
+                batch_size, kv_len, kv_len, dtype=torch.bool, device=query.device
+            ).triu(diagonal=1)
+            causal_mask = causal_mask[:, -q_len:, :]
+            attn_mask.masked_fill_(causal_mask, -torch.inf)
         if key_padding_mask is not None:
+            # Not compatible with KV cache.
             if key_padding_mask.dtype == torch.bool:
                 key_padding_mask = torch.where(key_padding_mask, -torch.inf, 0.0)
             key_padding_mask = key_padding_mask.unsqueeze(-2)  # (B, 1, kv_len)
-            attn_mask = attn_mask + key_padding_mask
+            attn_mask = attn_mask + key_padding_mask  # (B, q_len, kv_len)
 
         # Compute final attention scores.
         attn_mask = attn_mask.unsqueeze(-3)  # (B, 1, q_len, kv_len)
         attn_score = torch.softmax(
             attn_score + attn_mask, dim=-1
         )  # (B, num_heads, q_len, kv_len)
-
-        # Transpose v to (B, num_heads, kv_len, d_v).
-        v = v.view(batch_size, kv_len, self.num_heads, self.d_v).transpose(-2, -3)
 
         # Apply attention scores to the value vectors, concatenate the heads, and project to the
         # output dimension.
@@ -319,18 +341,12 @@ class DecoderLayer(nn.Module):
         if ctx_mask is not None:
             ctx_mask = ~ctx_mask.bool()
 
-        # Causal self-attention.
-        seq_len = x.size(1)
-        causal_mask = torch.ones(
-            seq_len, seq_len, dtype=torch.bool, device=x.device, requires_grad=False
-        ).triu(diagonal=1)
-
         attn_out = self.self_attn(
             query=x,
             key=x,
             value=x,
             key_padding_mask=mask,
-            attn_mask=causal_mask,
+            is_causal=True,
         )
         x = self.norm1(x + attn_out)
 
