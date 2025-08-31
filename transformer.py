@@ -445,6 +445,7 @@ class Transformer(nn.Module):
         self,
         x: torch.Tensor,
         ctx: torch.Tensor,
+        *,
         mask: torch.Tensor | None = None,
         ctx_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -455,7 +456,9 @@ class Transformer(nn.Module):
 
 
 def load_dataset(
-    batch_size=32, shuffle=True
+    tokenizer: transformers.PreTrainedTokenizer,
+    batch_size=32,
+    shuffle=True,
 ) -> tuple[data.DataLoader, data.DataLoader, int]:
     """Load the Multi30k dataset with German-English language pair.
 
@@ -484,10 +487,6 @@ def load_dataset(
         print(f"  German text: {src}")
         print(f"  English text: {tgt}")
         print()
-
-    # Load the tokenizer.
-    print("Loading BERT tokenizer...")
-    tokenizer = transformers.BertTokenizer.from_pretrained("bert-base-uncased")
 
     def _string_to_tokens(
         batch: list[dict[str, str]],
@@ -553,8 +552,15 @@ def main() -> None:
         device = torch.device("cpu")
     print(f"Using device: {device}")
 
+    # Load pre-trained tokenizer.
+    print("Loading BERT tokenizer...")
+    tokenizer = transformers.BertTokenizer.from_pretrained("bert-base-uncased")
+
     # Load dataset
-    train_loader, valid_loader, vocab_size = load_dataset(batch_size=16)
+    train_loader, valid_loader, vocab_size = load_dataset(
+        tokenizer=tokenizer,
+        batch_size=16,
+    )
     print(f"Vocabulary size: {vocab_size}")
 
     # Initialize model
@@ -596,14 +602,12 @@ def main() -> None:
             tgt_input_mask = tgt_mask[:, :-1]
 
             optimizer.zero_grad()
-            logits = model(tgt_input, src, tgt_input_mask, src_mask)
+            logits = model(
+                tgt_input, src, mask=tgt_input_mask, ctx_mask=src_mask
+            )  # (B, L, vocab_size)
 
-            # Reshape output and target for loss calculation
-            logits = logits.view(-1, vocab_size)  # (B * L, vocab_size)
-            labels = tgt_target.reshape(-1)  # (B * L)
-
-            # Calculate loss
-            loss = criterion(logits, labels)
+            # Calculate loss. Fuse the batch and length dimensions for cross-entropy.
+            loss = criterion(logits.view(-1, vocab_size), tgt_target.reshape(-1))
 
             # Backward pass
             loss.backward()
@@ -615,6 +619,13 @@ def main() -> None:
             # Print progress every 100 batches
             if batch_idx % 100 == 0:
                 print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+
+                # Also print an example output, truncated to the first 16 tokens.
+                ex_label = tgt_target[-1, :16]
+                ex_pred = torch.argmax(logits[-1, :16, :], dim=-1)
+                print(f"  Example:")
+                print(f"  Label : {tokenizer.decode(ex_label)}")
+                print(f"  Output: {tokenizer.decode(ex_pred)}")
 
         # Calculate average loss for the epoch
         avg_loss = total_loss / num_batches
@@ -636,7 +647,7 @@ def main() -> None:
                 tgt_target = tgt[:, 1:]
                 tgt_input_mask = tgt_mask[:, :-1]
 
-                logits = model(tgt_input, src, tgt_input_mask, src_mask)
+                logits = model(tgt_input, src, mask=tgt_input_mask, ctx_mask=src_mask)
                 logits = logits.view(-1, vocab_size)
                 labels = tgt_target.reshape(-1)
 

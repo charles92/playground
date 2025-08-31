@@ -411,7 +411,10 @@ def test_transformer_with_padding_output_shape(padding_test_data):
         max_seq_len=256,
     )
     output = transformer(
-        data["x_tokens"], data["ctx_tokens"], data["mask"], data["ctx_mask"]
+        data["x_tokens"],
+        data["ctx_tokens"],
+        mask=data["mask"],
+        ctx_mask=data["ctx_mask"],
     )
     assert output.shape == (16, 102, 1000)
 
@@ -519,3 +522,35 @@ def test_decoder_layer_causal_mask_works():
     # The first 4 positions should be identical since causal masking prevents later positions
     # from affecting earlier ones.
     torch.testing.assert_close(y1[:, :4, :], y2[:, :4, :])
+
+
+def test_inference():
+    vocab_size, max_len = 1000, 128
+    ctx = torch.randint(0, vocab_size, (2, max_len))  # (batch, length)
+    # Last 50 context tokens are padding.
+    ctx_mask = torch.ones_like(ctx)
+    ctx_mask[:, 78:] = 0
+
+    transformer = Transformer(
+        vocab_size=vocab_size,
+        d_model=512,
+        d_ff=2048,
+        d_out=1000,
+        num_heads=8,
+        num_layers=6,
+        max_seq_len=max_len,
+    )
+    transformer.eval()
+
+    # First token.
+    x0 = torch.randint(0, vocab_size, (2, 1))
+
+    # Accumulates input tokens. Shape (batch, length) as length increases.
+    prev_x = x0
+
+    for i in range(max_len):
+        logits = transformer(prev_x, ctx, ctx_mask=ctx_mask)
+        y = torch.argmax(logits, dim=-1)
+        assert y.shape == (2, i + 1)
+        assert torch.all(y[:, :-1] == prev_x[:, 1:])
+        prev_x = torch.cat([prev_x, y[:, -1:]], dim=-1)
