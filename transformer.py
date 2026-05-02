@@ -41,10 +41,11 @@ class MultiHeadAttention(nn.Module):
         d_key: int | None = None,
         d_value: int | None = None,
         dropout_rate: float = 0.1,
+        kv_cache_len: int = 0,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.num_heads = num_heads
+        self.n_heads = num_heads
 
         # Use default Q, K, V dimensions if not specified.
         d_head = d_model // num_heads
@@ -63,6 +64,11 @@ class MultiHeadAttention(nn.Module):
         # Output dropout.
         self.dropout = nn.Dropout(dropout_rate)
 
+        # KV cache.
+        self.kv_cache: KvCache | None = None
+        if kv_cache_len > 0:
+            self.kv_cache = KvCache(kv_cache_len, num_heads, self.d_qk, self.d_v)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -70,9 +76,7 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
         key_padding_mask: torch.Tensor | None = None,
         is_causal: bool = False,
-        cache_len: int = 0,
-        k_cache: torch.Tensor | None = None,
-        v_cache: torch.Tensor | None = None,
+        cache_pos: int = -1,
     ) -> torch.Tensor:
         """Forward pass.
 
@@ -85,18 +89,14 @@ class MultiHeadAttention(nn.Module):
               position will be ignored for the purpose of attention. For float masks, the mask
               values are added directly to the pre-softmax attention scores.
             is_causal: Whether to apply a causal mask to the attention scores.
-            cache_len: Length of the context that's already been cached in `k_cache` and `v_cache`.
-            k_cache: Cached key tensor for previous timesteps. Shape (batch_size, num_heads,
-              cache_len, d_qk). Keys from timesteps [0:cache_len] will be read directly
-              from k_cache[:, :, :cache_len, :]. New keys computed for the current timestep
-              are added to k_cache[:, :, cache_len:, :].
-            v_cache: Cached value tensor for previous timesteps. Shape (batch_size, num_heads,
-              cache_len, d_v). Operates similarly to `k_cache`, but for values.
+            cache_pos: When KV cache is enabled, defines the length of the context that's already
+              been cached. Default to -1, meaning no cache is used. If KV cache is disabled when
+              constructing this module, an error will be raised.
 
         Returns:
             Output tensor of shape (batch_size, q_len, d_model).
         """
-        batch_size, q_len, _ = query.size()
+        bs, q_len, _ = query.size()
         _, kv_len, _ = key.size()
 
         q = self.q_proj(query)  # (B, q_len, d_qk * num_heads)
@@ -104,17 +104,23 @@ class MultiHeadAttention(nn.Module):
         v = self.v_proj(value)  # (B, kv_len, d_v * num_heads)
 
         # Transpose q, k, and v such that the first two dimensions are (B, num_heads).
-        q = q.view(batch_size, q_len, self.num_heads, self.d_qk).transpose(-2, -3)
-        k = k.view(batch_size, kv_len, self.num_heads, self.d_qk).transpose(-2, -3)
-        v = v.view(batch_size, kv_len, self.num_heads, self.d_v).transpose(-2, -3)
+        q = q.view(bs, q_len, self.n_heads, self.d_qk).transpose(-2, -3)
+        k = k.view(bs, kv_len, self.n_heads, self.d_qk).transpose(-2, -3)
+        v = v.view(bs, kv_len, self.n_heads, self.d_v).transpose(-2, -3)
+
+        # Process key padding mask.
+        if key_padding_mask is None:
+            key_padding_mask = torch.zeros(bs, kv_len, device=query.device)
+        elif key_padding_mask.dtype == torch.bool:
+            key_padding_mask = torch.where(key_padding_mask, -torch.inf, 0.0)
 
         # Read & update KV cache.
-        if k_cache is not None and v_cache is not None:
-            kv_len = cache_len + kv_len
-            k_cache[:, :, cache_len:kv_len, :] = k
-            v_cache[:, :, cache_len:kv_len, :] = v
-            k = k_cache[:, :, :kv_len, :]
-            v = v_cache[:, :, :kv_len, :]
+        if cache_pos >= 0:
+            assert self.kv_cache is not None
+            k, v, key_padding_mask = self.kv_cache.update(
+                cache_pos, k, v, key_padding_mask
+            )
+            kv_len = k.size(-2)
 
         # (B, num_heads, q_len, kv_len).
         attn_score = (q @ k.transpose(-1, -2)) * torch.rsqrt(
@@ -122,23 +128,19 @@ class MultiHeadAttention(nn.Module):
         )
 
         # Process attention masks.
-        attn_mask = torch.zeros(batch_size, q_len, kv_len, device=query.device)
+        attn_mask = torch.zeros(bs, q_len, kv_len, device=query.device)
         if is_causal:
             # Create a square upper triangular causal mask, and truncate to the last q_len
             # positions. When the KV cache is inactive (e.g., during training), q_len == kv_len for
             # causal self-attention, and this truncation is a no-op. When the KV cache is active,
             # we only care about the last q_len rows of the causal attention mask.
             causal_mask = torch.ones(
-                batch_size, kv_len, kv_len, dtype=torch.bool, device=query.device
+                bs, kv_len, kv_len, dtype=torch.bool, device=query.device
             ).triu(diagonal=1)
             causal_mask = causal_mask[:, -q_len:, :]
             attn_mask.masked_fill_(causal_mask, -torch.inf)
-        if key_padding_mask is not None:
-            # Not compatible with KV cache.
-            if key_padding_mask.dtype == torch.bool:
-                key_padding_mask = torch.where(key_padding_mask, -torch.inf, 0.0)
-            key_padding_mask = key_padding_mask.unsqueeze(-2)  # (B, 1, kv_len)
-            attn_mask = attn_mask + key_padding_mask  # (B, q_len, kv_len)
+        key_padding_mask = key_padding_mask.unsqueeze(-2)  # (B, 1, kv_len)
+        attn_mask = attn_mask + key_padding_mask  # (B, q_len, kv_len)
 
         # Compute final attention scores.
         attn_mask = attn_mask.unsqueeze(-3)  # (B, 1, q_len, kv_len)
@@ -149,13 +151,80 @@ class MultiHeadAttention(nn.Module):
         # Apply attention scores to the value vectors, concatenate the heads, and project to the
         # output dimension.
         output = attn_score @ v  # (B, num_heads, q_len, d_v)
-        output = output.transpose(-2, -3).reshape(
-            batch_size, q_len, self.d_v * self.num_heads
-        )
+        output = output.transpose(-2, -3).reshape(bs, q_len, self.d_v * self.n_heads)
         output = self.o_proj(output)
         output = self.dropout(output)
 
         return output
+
+
+class KvCache:
+    def __init__(self, cache_len: int, n_heads: int, d_qk: int, d_v: int):
+        self.cache_len = cache_len
+        self.n_heads = n_heads
+        self.d_qk = d_qk
+        self.d_v = d_v
+
+        self.k_cache: torch.Tensor | None = None
+        self.v_cache: torch.Tensor | None = None
+        self.mask_cache: torch.Tensor | None = None
+
+    def _init(self, bs: int, device: torch.device):
+        """Initializes the cache with known batch size."""
+        self.k_cache = torch.zeros(
+            bs, self.n_heads, self.cache_len, self.d_qk, device=device
+        )
+        self.v_cache = torch.zeros(
+            bs, self.n_heads, self.cache_len, self.d_v, device=device
+        )
+        self.mask_cache = torch.zeros(bs, self.cache_len, device=device)
+
+    def update(
+        self, cache_pos: int, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Updates the cache with new key, value, and key padding mask.
+
+        Args:
+            cache_pos: The position of the cache to update.
+            k: New key tensor of shape (B, n_heads, kv_len, d_qk).
+            v: New value tensor of shape (B, n_heads, kv_len, d_v).
+            mask: New key padding mask tensor of shape (B, kv_len).
+
+        Returns:
+            Updated key, value, and key padding mask tensors where cached histories are prepended
+            to the front. The kv_len dimension is increased by `cache_pos`.
+        """
+        bs, _, kv_len, _ = k.size()
+
+        # Initialize the cache if it's the first time we're calling this method.
+        if cache_pos == 0:
+            self._init(bs, k.device)
+        assert self.k_cache is not None
+        assert self.v_cache is not None
+        assert self.mask_cache is not None
+
+        kv_len = cache_pos + kv_len
+
+        # Check if we have enough space in the cache for the upcoming update. If not, throw away
+        # the oldest entries.
+        if kv_len > self.cache_len:
+            shift = kv_len - self.cache_len
+            self.k_cache[:, :, :-shift, :] = self.k_cache[:, :, shift:, :]
+            self.v_cache[:, :, :-shift, :] = self.v_cache[:, :, shift:, :]
+            self.mask_cache[:, :-shift] = self.mask_cache[:, shift:]
+            cache_pos -= shift
+            kv_len -= shift
+
+        # Update the cache.
+        self.k_cache[:, :, cache_pos:kv_len, :] = k
+        self.v_cache[:, :, cache_pos:kv_len, :] = v
+        self.mask_cache[:, cache_pos:kv_len] = mask
+
+        return (
+            self.k_cache[:, :, :kv_len, :],
+            self.v_cache[:, :, :kv_len, :],
+            self.mask_cache[:, :kv_len],
+        )
 
 
 class SinusoidalPositionalEncoding(nn.Module):

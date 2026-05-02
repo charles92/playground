@@ -140,61 +140,58 @@ def test_mha_gradients():
 def test_mha_kv_cache_is_updated(is_causal):
     batch_size, d_model = 4, 64
 
-    mha = MultiHeadAttention(d_model=d_model, num_heads=8)
+    mha = MultiHeadAttention(d_model=d_model, num_heads=8, kv_cache_len=10)
     mha.eval()
     q = torch.randn(batch_size, 1, d_model)
     k = torch.randn(batch_size, 1, d_model)
     v = torch.randn(batch_size, 1, d_model)
 
-    max_cache_len = 10
-    k_cache = torch.randn(batch_size, mha.num_heads, max_cache_len, mha.d_qk)
-    v_cache = torch.randn(batch_size, mha.num_heads, max_cache_len, mha.d_v)
-    k_cache_0 = k_cache.clone()
-    v_cache_0 = v_cache.clone()
-
     # The first time step updates the first entry in the cache.
-    mha(q, k, v, cache_len=0, k_cache=k_cache, v_cache=v_cache, is_causal=is_causal)
-    assert not torch.allclose(k_cache[:, :, 0, :], k_cache_0[:, :, 0, :])
-    assert not torch.allclose(v_cache[:, :, 0, :], v_cache_0[:, :, 0, :])
-    assert torch.allclose(k_cache[:, :, 1:, :], k_cache_0[:, :, 1:, :])
-    assert torch.allclose(v_cache[:, :, 1:, :], v_cache_0[:, :, 1:, :])
+    mha(q, k, v, is_causal=is_causal, cache_pos=0)
+    assert not torch.allclose(mha.kv_cache.k_cache[:, :, 0, :], torch.zeros(()))
+    assert not torch.allclose(mha.kv_cache.v_cache[:, :, 0, :], torch.zeros(()))
+    assert torch.allclose(mha.kv_cache.k_cache[:, :, 1:, :], torch.zeros(()))
+    assert torch.allclose(mha.kv_cache.v_cache[:, :, 1:, :], torch.zeros(()))
 
     # The second time step updates the second entry only.
-    k_cache_1 = k_cache.clone()
-    v_cache_1 = v_cache.clone()
-    mha(q, k, v, cache_len=1, k_cache=k_cache, v_cache=v_cache, is_causal=is_causal)
-    assert not torch.allclose(k_cache[:, :, 1, :], k_cache_1[:, :, 1, :])
-    assert not torch.allclose(v_cache[:, :, 1, :], v_cache_1[:, :, 1, :])
-    assert torch.allclose(k_cache[:, :, 0, :], k_cache_1[:, :, 0, :])
-    assert torch.allclose(v_cache[:, :, 0, :], v_cache_1[:, :, 0, :])
-    assert torch.allclose(k_cache[:, :, 2:, :], k_cache_1[:, :, 2:, :])
-    assert torch.allclose(v_cache[:, :, 2:, :], v_cache_1[:, :, 2:, :])
+    prev_k_cache = mha.kv_cache.k_cache.clone()
+    prev_v_cache = mha.kv_cache.v_cache.clone()
+    mha(q, k, v, is_causal=is_causal, cache_pos=1)
+    assert not torch.allclose(
+        mha.kv_cache.k_cache[:, :, 1, :], prev_k_cache[:, :, 1, :]
+    )
+    assert not torch.allclose(
+        mha.kv_cache.v_cache[:, :, 1, :], prev_v_cache[:, :, 1, :]
+    )
+    assert torch.allclose(mha.kv_cache.k_cache[:, :, 0, :], prev_k_cache[:, :, 0, :])
+    assert torch.allclose(mha.kv_cache.v_cache[:, :, 0, :], prev_v_cache[:, :, 0, :])
+    assert torch.allclose(mha.kv_cache.k_cache[:, :, 2:, :], prev_k_cache[:, :, 2:, :])
+    assert torch.allclose(mha.kv_cache.v_cache[:, :, 2:, :], prev_v_cache[:, :, 2:, :])
 
 
 @pytest.mark.parametrize("is_causal", [False, True])
 def test_mha_kv_cache_affects_output(is_causal):
     batch_size, d_model = 4, 64
 
-    mha = MultiHeadAttention(d_model=d_model, num_heads=8)
+    mha = MultiHeadAttention(d_model=d_model, num_heads=8, kv_cache_len=10)
     mha.eval()
     q = torch.randn(batch_size, 1, d_model)
     k = torch.randn(batch_size, 1, d_model)
     v = torch.randn(batch_size, 1, d_model)
 
-    max_cache_len = 10
-    k_cache_0 = torch.randn(batch_size, mha.num_heads, max_cache_len, mha.d_qk)
-    v_cache_0 = torch.randn(batch_size, mha.num_heads, max_cache_len, mha.d_v)
-    k_cache_1 = k_cache_0.clone()
-    k_cache_1[:, :, 0, :] = 0.0
-    v_cache_1 = v_cache_0.clone()
-    v_cache_1[:, :, 0, :] = 0.0
+    mha.kv_cache.k_cache = torch.randn(
+        batch_size, mha.n_heads, mha.kv_cache.cache_len, mha.d_qk
+    )
+    mha.kv_cache.v_cache = torch.randn(
+        batch_size, mha.n_heads, mha.kv_cache.cache_len, mha.d_v
+    )
+    mha.kv_cache.mask_cache = torch.zeros(batch_size, mha.kv_cache.cache_len)
+    y0 = mha(q, k, v, is_causal=is_causal, cache_pos=1)
 
-    y0 = mha(
-        q, k, v, cache_len=1, k_cache=k_cache_0, v_cache=v_cache_0, is_causal=is_causal
-    )
-    y1 = mha(
-        q, k, v, cache_len=1, k_cache=k_cache_1, v_cache=v_cache_1, is_causal=is_causal
-    )
+    mha.kv_cache.k_cache[:, :, 0, :] = 0.0
+    mha.kv_cache.v_cache[:, :, 0, :] = 0.0
+    y1 = mha(q, k, v, is_causal=is_causal, cache_pos=1)
+
     assert not torch.allclose(y0, y1)
 
 
