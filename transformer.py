@@ -7,7 +7,7 @@ Paper: Vaswani et al., 2017. Attention is all you need. https://arxiv.org/abs/17
 Common parameters:
 - `d_model`: primary model dimension, which is the length of the token embedding vectors.
 - `d_ff`: dimension of the hidden layer in the feed-forward network.
-- `d_out`: output vocabulary size. The final embedding vector of length `d_model` is projected to 
+- `d_out`: output vocabulary size. The final embedding vector of length `d_model` is projected to
   logits of length `d_out`.
 - `num_heads`: number of attention heads in each multi-head attention (MHA) module.
 - `num_layers`: number of MHA layers in the encoder and decoder respectively.
@@ -108,6 +108,12 @@ class MultiHeadAttention(nn.Module):
         k = k.view(bs, kv_len, self.n_heads, self.d_qk).transpose(-2, -3)
         v = v.view(bs, kv_len, self.n_heads, self.d_v).transpose(-2, -3)
 
+        # Equivalent one-liner from torch:
+        # output = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=...)
+        # output = output.transpose(-2, -3).view(bs, q_len, self.d_v * self.n_heads)
+        # output = self.o_proj(output)
+        # output = self.dropout(output)
+
         # Process key padding mask.
         if key_padding_mask is None:
             key_padding_mask = torch.zeros(bs, kv_len, device=query.device)
@@ -130,14 +136,17 @@ class MultiHeadAttention(nn.Module):
         # Process attention masks.
         attn_mask = torch.zeros(bs, q_len, kv_len, device=query.device)
         if is_causal:
-            # Create a square upper triangular causal mask, and truncate to the last q_len
-            # positions. When the KV cache is inactive (e.g., during training), q_len == kv_len for
-            # causal self-attention, and this truncation is a no-op. When the KV cache is active,
-            # we only care about the last q_len rows of the causal attention mask.
+            # Create a square upper triangular matrix where 1 means attention is disallowed. The
+            # main diagonal is 0, meaning attention to the current index is allowed.
             causal_mask = torch.ones(
                 bs, kv_len, kv_len, dtype=torch.bool, device=query.device
             ).triu(diagonal=1)
+            # Truncate to the last q_len positions. When the KV cache is inactive (e.g., during
+            # training), q_len == kv_len for causal self-attention, and this truncation is a no-op.
+            # When the KV cache is active, we only care about the last q_len rows of the causal
+            # attention mask.
             causal_mask = causal_mask[:, -q_len:, :]
+            # The masked locations get -inf before softmax.
             attn_mask.masked_fill_(causal_mask, -torch.inf)
         key_padding_mask = key_padding_mask.unsqueeze(-2)  # (B, 1, kv_len)
         attn_mask = attn_mask + key_padding_mask  # (B, q_len, kv_len)
@@ -152,7 +161,7 @@ class MultiHeadAttention(nn.Module):
         # output dimension.
         output = attn_score @ v  # (B, num_heads, q_len, d_v)
         output = output.transpose(-2, -3).reshape(bs, q_len, self.d_v * self.n_heads)
-        output = self.o_proj(output)
+        output = self.o_proj(output)  # (B, q_len, d_model)
         output = self.dropout(output)
 
         return output
@@ -345,6 +354,7 @@ class Encoder(nn.Module):
     ):
         super().__init__(**kwargs)
         self.emb = nn.Embedding(vocab_size, d_model)
+        # self.pe = SinusoidalPositionalEncoding(max_seq_len, d_model)
         self.pe = TrainablePositionalEncoding(max_seq_len, d_model)
         self.dropout = nn.Dropout(dropout_rate)
         self.layers = nn.ModuleList(
